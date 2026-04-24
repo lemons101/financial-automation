@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import tempfile
 import textwrap
 import unittest
 import uuid
@@ -18,104 +17,119 @@ from src.output_formatter import (
     format_skill_run_result,
 )
 from src.skill_entry import create_job_workspace, materialize_attachments, run_skill_job
+from src.sync_bitable import (
+    BitableSettings,
+    build_expense_record,
+    build_transport_record,
+    load_bitable_settings,
+    sync_skill_result_to_bitable,
+)
 from src.validate import validate_documents
+
+
+def _make_test_workspace() -> Path:
+    sandbox_root = Path(__file__).resolve().parent.parent / ".tmp_tests"
+    sandbox_root.mkdir(parents=True, exist_ok=True)
+    workspace = sandbox_root / f"test_{uuid.uuid4().hex}"
+    workspace.mkdir(parents=True, exist_ok=True)
+    return workspace
 
 
 class PathResolutionSmokeTest(unittest.TestCase):
     def test_relative_paths_are_resolved_from_project_root(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            project_root = Path(temp_dir)
-            config_dir = project_root / "config"
-            config_dir.mkdir()
+        project_root = _make_test_workspace()
+        self.addCleanup(lambda: shutil.rmtree(project_root, ignore_errors=True))
+        config_dir = project_root / "config"
+        config_dir.mkdir()
 
-            config_path = config_dir / "app_config.yaml"
-            config_path.write_text(
-                textwrap.dedent(
-                    """
-                    paths:
-                      input_dir: runtime/inbox
-                      output_dir: runtime/output
-                      runtime_dir: runtime
-                    ocr:
-                      rapidocr:
-                        model_root_dir: runtime/models/rapidocr
-                    validate:
-                      rules_file: config/rules.yaml
-                    """
-                ).strip()
-                + "\n",
-                encoding="utf-8",
-            )
+        config_path = config_dir / "app_config.yaml"
+        config_path.write_text(
+            textwrap.dedent(
+                """
+                paths:
+                  input_dir: runtime/inbox
+                  output_dir: runtime/output
+                  runtime_dir: runtime
+                ocr:
+                  rapidocr:
+                    model_root_dir: runtime/models/rapidocr
+                validate:
+                  rules_file: config/rules.yaml
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
 
-            config, detected_root = load_app_config(config_path)
-            self.assertEqual(detected_root, project_root.resolve())
-            self.assertEqual(
-                config["paths"]["input_dir"],
-                str((project_root / "runtime/inbox").resolve()),
-            )
-            self.assertEqual(
-                config["ocr"]["rapidocr"]["model_root_dir"],
-                str((project_root / "runtime/models/rapidocr").resolve()),
-            )
+        config, detected_root = load_app_config(config_path)
+        self.assertEqual(detected_root, project_root.resolve())
+        self.assertEqual(
+            config["paths"]["input_dir"],
+            str((project_root / "runtime/inbox").resolve()),
+        )
+        self.assertEqual(
+            config["ocr"]["rapidocr"]["model_root_dir"],
+            str((project_root / "runtime/models/rapidocr").resolve()),
+        )
 
     def test_openclaw_project_root_override(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            workspace = Path(temp_dir)
-            config_dir = workspace / "proj" / "config"
-            config_dir.mkdir(parents=True)
-            override_root = workspace / "override_root"
-            override_root.mkdir()
+        workspace = _make_test_workspace()
+        self.addCleanup(lambda: shutil.rmtree(workspace, ignore_errors=True))
+        config_dir = workspace / "proj" / "config"
+        config_dir.mkdir(parents=True)
+        override_root = workspace / "override_root"
+        override_root.mkdir()
 
-            config_path = config_dir / "app_config.yaml"
-            config_path.write_text(
-                "paths:\n  input_dir: runtime/inbox\n",
-                encoding="utf-8",
-            )
+        config_path = config_dir / "app_config.yaml"
+        config_path.write_text(
+            "paths:\n  input_dir: runtime/inbox\n",
+            encoding="utf-8",
+        )
 
-            old_value = os.environ.get("OPENCLAW_PROJECT_ROOT")
-            os.environ["OPENCLAW_PROJECT_ROOT"] = str(override_root)
-            try:
-                config, detected_root = load_app_config(config_path)
-            finally:
-                if old_value is None:
-                    os.environ.pop("OPENCLAW_PROJECT_ROOT", None)
-                else:
-                    os.environ["OPENCLAW_PROJECT_ROOT"] = old_value
+        old_value = os.environ.get("OPENCLAW_PROJECT_ROOT")
+        os.environ["OPENCLAW_PROJECT_ROOT"] = str(override_root)
+        try:
+            config, detected_root = load_app_config(config_path)
+        finally:
+            if old_value is None:
+                os.environ.pop("OPENCLAW_PROJECT_ROOT", None)
+            else:
+                os.environ["OPENCLAW_PROJECT_ROOT"] = old_value
 
-            self.assertEqual(detected_root, override_root.resolve())
-            self.assertEqual(
-                config["paths"]["input_dir"],
-                str((override_root / "runtime/inbox").resolve()),
-            )
+        self.assertEqual(detected_root, override_root.resolve())
+        self.assertEqual(
+            config["paths"]["input_dir"],
+            str((override_root / "runtime/inbox").resolve()),
+        )
 
 
 class IngestSmokeTest(unittest.TestCase):
     def test_ingest_filters_and_collects_metadata(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            inbox = root / "runtime" / "inbox"
-            inbox.mkdir(parents=True)
+        root = _make_test_workspace()
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        inbox = root / "runtime" / "inbox"
+        inbox.mkdir(parents=True)
 
-            (inbox / "ok_invoice.pdf").write_bytes(b"fake-pdf")
-            (inbox / "ok_image.JPG").write_bytes(b"fake-image")
-            (inbox / "note.txt").write_text("not supported", encoding="utf-8")
-            (inbox / "empty.png").write_bytes(b"")
-            (inbox / "~$tmp.pdf").write_bytes(b"temp")
+        (inbox / "ok_invoice.pdf").write_bytes(b"fake-pdf")
+        (inbox / "ok_image.JPG").write_bytes(b"fake-image")
+        (inbox / "note.txt").write_text("not supported", encoding="utf-8")
+        (inbox / "empty.png").write_bytes(b"")
+        (inbox / "~$tmp.pdf").write_bytes(b"temp")
 
-            config = {"paths": {"input_dir": str(inbox)}}
-            documents, report = load_input_documents(config)
+        config = {"paths": {"input_dir": str(inbox)}}
+        documents, report = load_input_documents(config)
 
-            self.assertEqual(report["total_seen"], 5)
-            self.assertEqual(report["accepted"], 2)
-            self.assertEqual(report["skipped"], 3)
-            self.assertEqual(report["skip_reasons"]["unsupported_ext"], 1)
-            self.assertEqual(report["skip_reasons"]["empty_file"], 1)
-            self.assertEqual(report["skip_reasons"]["temp_file"], 1)
+        self.assertEqual(report["total_seen"], 5)
+        self.assertEqual(report["accepted"], 2)
+        self.assertEqual(report["skipped"], 3)
+        self.assertEqual(report["skip_reasons"]["unsupported_ext"], 1)
+        self.assertEqual(report["skip_reasons"]["empty_file"], 1)
+        self.assertEqual(report["skip_reasons"]["temp_file"], 1)
 
-            self.assertEqual(len(documents), 2)
-            self.assertIn("doc_id", documents[0])
-            self.assertIn("file_path", documents[0])
-            self.assertIn("modified_at", documents[0])
+        self.assertEqual(len(documents), 2)
+        self.assertIn("doc_id", documents[0])
+        self.assertIn("file_path", documents[0])
+        self.assertIn("modified_at", documents[0])
 
     def test_ingest_handles_missing_input_dir(self) -> None:
         documents, report = load_input_documents({"paths": {"input_dir": "D:/missing/path"}})
@@ -576,6 +590,7 @@ class SkillEntrySmokeTest(unittest.TestCase):
         fake_result = {
             "status": "completed",
             "summary": {"documents_extracted": 1},
+            "documents": [],
         }
 
         with patch("src.skill_entry.run_pipeline_for_job") as mocked_run, patch(
@@ -598,8 +613,190 @@ class SkillEntrySmokeTest(unittest.TestCase):
         mocked_load.assert_called_once()
         self.assertEqual(result["status"], "completed")
         self.assertIn("job", result)
+        self.assertEqual(result["bitable_sync"]["status"], "disabled")
         self.assertEqual(len(result["job"]["saved_files"]), 1)
         self.assertTrue(result["job"]["saved_files"][0].endswith("ticket.jpg"))
+
+
+class SyncBitableSmokeTest(unittest.TestCase):
+    def test_load_bitable_settings_prefers_environment_overrides(self) -> None:
+        old_values = {
+            "FEISHU_APP_ID": os.environ.get("FEISHU_APP_ID"),
+            "FEISHU_APP_SECRET": os.environ.get("FEISHU_APP_SECRET"),
+            "FEISHU_BITABLE_APP_TOKEN": os.environ.get("FEISHU_BITABLE_APP_TOKEN"),
+            "FEISHU_BITABLE_TRANSPORT_TABLE": os.environ.get("FEISHU_BITABLE_TRANSPORT_TABLE"),
+            "FEISHU_BITABLE_EXPENSE_TABLE": os.environ.get("FEISHU_BITABLE_EXPENSE_TABLE"),
+        }
+        os.environ["FEISHU_APP_ID"] = "cli_app_id"
+        os.environ["FEISHU_APP_SECRET"] = "cli_secret"
+        os.environ["FEISHU_BITABLE_APP_TOKEN"] = "cli_app_token"
+        os.environ["FEISHU_BITABLE_TRANSPORT_TABLE"] = "cli_transport"
+        os.environ["FEISHU_BITABLE_EXPENSE_TABLE"] = "cli_expense"
+        try:
+            settings = load_bitable_settings(
+                {
+                    "sync": {
+                        "bitable": {
+                            "enabled": True,
+                            "dry_run": True,
+                            "app_id_env": "FEISHU_APP_ID",
+                            "app_secret_env": "FEISHU_APP_SECRET",
+                            "app_token_env": "FEISHU_BITABLE_APP_TOKEN",
+                            "transport_table_id_env": "FEISHU_BITABLE_TRANSPORT_TABLE",
+                            "expense_table_id_env": "FEISHU_BITABLE_EXPENSE_TABLE",
+                        }
+                    }
+                }
+            )
+        finally:
+            for key, value in old_values.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.assertEqual(settings.app_id, "cli_app_id")
+        self.assertEqual(settings.transport_table_id, "cli_transport")
+        self.assertEqual(settings.expense_table_id, "cli_expense")
+
+    def test_build_transport_record_maps_fields(self) -> None:
+        document = {
+            "doc_id": "doc-rail",
+            "document_type": "transportation_fee",
+            "source_file_name": "ticket.jpg",
+            "extraction": {
+                "document": {
+                    "invoice_number": "25339190041005476782",
+                    "amount": 87.0,
+                    "currency": "CNY",
+                },
+                "buyer": {"name": "Fudan", "tax_id": "12100000425006117P"},
+                "travel": {
+                    "transport_number": "G240",
+                    "from_station": "Hangzhou East",
+                    "to_station": "Shanghai Hongqiao",
+                    "travel_date": "2025-10-12",
+                    "departure_time": "19:34",
+                },
+                "passenger": {
+                    "name": "Lemon",
+                    "seat_no": "05车14F号",
+                    "seat_class": "二等座",
+                },
+            },
+            "validation": {"status": "pass"},
+            "review": {"needs_review": True, "reasons": ["image_ocr_requires_review"]},
+        }
+
+        record = build_transport_record(document, [{"file_token": "file-token"}])
+        fields = record["fields"]
+
+        self.assertEqual(fields["报销类型"], "交通报销")
+        self.assertEqual(fields["票据号码"], "25339190041005476782")
+        self.assertEqual(fields["购票主体"], "Fudan")
+        self.assertEqual(fields["车次"], "G240")
+        self.assertEqual(fields["票据附件"][0]["file_token"], "file-token")
+        self.assertTrue(fields["是否复核"])
+
+    def test_build_expense_record_maps_first_line_item_and_json(self) -> None:
+        document = {
+            "doc_id": "doc-expense",
+            "document_type": "conference_fee",
+            "source_file_name": "invoice.pdf",
+            "extraction": {
+                "document": {
+                    "invoice_number": "24112000000114409809",
+                    "issue_date": "2024-08-26",
+                    "amount": 5570.80,
+                    "currency": "CNY",
+                },
+                "buyer": {"name": "Fudan", "tax_id": "12100000425006117P"},
+                "seller": {"name": "Vendor", "tax_id": "911111111111111111"},
+                "line_items": [
+                    {
+                        "item_name": "会议费",
+                        "quantity": 1,
+                        "unit_price": 5515.64,
+                        "line_amount": 5515.64,
+                        "tax_rate": "1%",
+                        "tax_amount": 55.16,
+                    },
+                    {
+                        "item_name": "服务费",
+                        "quantity": 1,
+                        "unit_price": 10.00,
+                        "line_amount": 10.00,
+                        "tax_rate": "0%",
+                        "tax_amount": 0.00,
+                    },
+                ],
+            },
+            "validation": {"status": "warning"},
+            "review": {"needs_review": False, "reasons": []},
+        }
+
+        record = build_expense_record(document, [{"file_token": "file-token"}])
+        fields = record["fields"]
+
+        self.assertEqual(fields["报销类型"], "会议报销")
+        self.assertEqual(fields["项目名称"], "会议费")
+        self.assertEqual(fields["税率"], "1%")
+        self.assertIn("服务费", fields["项目明细JSON"])
+
+    def test_sync_skill_result_to_bitable_supports_dry_run(self) -> None:
+        settings = BitableSettings(
+            enabled=True,
+            dry_run=True,
+            endpoint="https://open.feishu.cn",
+            batch_size=200,
+            app_id="app_id",
+            app_secret="app_secret",
+            app_token="app_token",
+            transport_table_id="transport_table",
+            expense_table_id="expense_table",
+        )
+        skill_result = {
+            "documents": [
+                {
+                    "doc_id": "doc-rail",
+                    "document_type": "transportation_fee",
+                    "source_file_name": "ticket.jpg",
+                    "extraction": {
+                        "document": {"invoice_number": "123", "amount": 87.0, "currency": "CNY"},
+                        "buyer": {"name": "Fudan", "tax_id": "tax"},
+                        "travel": {"transport_number": "G240"},
+                        "passenger": {"name": "Lemon"},
+                    },
+                    "validation": {"status": "pass"},
+                    "review": {"needs_review": False, "reasons": []},
+                },
+                {
+                    "doc_id": "doc-expense",
+                    "document_type": "conference_fee",
+                    "source_file_name": "invoice.pdf",
+                    "extraction": {
+                        "document": {
+                            "invoice_number": "456",
+                            "issue_date": "2024-08-26",
+                            "amount": 100.0,
+                            "currency": "CNY",
+                        },
+                        "buyer": {"name": "Fudan", "tax_id": "tax"},
+                        "seller": {"name": "Vendor", "tax_id": "tax2"},
+                        "line_items": [{"item_name": "会议费"}],
+                    },
+                    "validation": {"status": "warning"},
+                    "review": {"needs_review": True, "reasons": ["manual_review"]},
+                },
+            ]
+        }
+
+        summary = sync_skill_result_to_bitable(skill_result, settings)
+
+        self.assertEqual(summary["status"], "dry_run")
+        self.assertEqual(summary["tables"]["transport"]["records_prepared"], 1)
+        self.assertEqual(summary["tables"]["expense"]["records_prepared"], 1)
+        self.assertEqual(summary["tables"]["transport"]["preview"][0]["fields"]["报销类型"], "交通报销")
 
 
 if __name__ == "__main__":

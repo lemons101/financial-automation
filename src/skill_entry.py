@@ -7,8 +7,10 @@ from typing import Any
 
 try:
     from .main import DEFAULT_CONFIG_PATH, load_app_config, run_pipeline
+    from .sync_bitable import sync_skill_result_with_config
 except ImportError:  # pragma: no cover - supports running as a script.
     from main import DEFAULT_CONFIG_PATH, load_app_config, run_pipeline
+    from sync_bitable import sync_skill_result_with_config
 
 
 SUPPORTED_SKILL_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png"}
@@ -40,6 +42,11 @@ def run_skill_job(
         "output_dir": str(workspace["output_dir"]),
         "saved_files": [str(path) for path in saved_files],
     }
+    result["bitable_sync"] = sync_skill_result_with_config(
+        result,
+        config,
+        attachment_paths=[str(path) for path in saved_files],
+    )
     return result
 
 

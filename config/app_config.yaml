@@ -44,16 +44,13 @@ sync:
     enabled: false
     dry_run: true
     endpoint: https://open.feishu.cn
-    idempotency_field: IdempotencyKey
     batch_size: 200
-    include_all_review_rows: false
     # Keep credentials/IDs in env vars.
     app_id_env: FEISHU_APP_ID
     app_secret_env: FEISHU_APP_SECRET
     app_token_env: FEISHU_BITABLE_APP_TOKEN
+    transport_table_id_env: FEISHU_BITABLE_TRANSPORT_TABLE
     expense_table_id_env: FEISHU_BITABLE_EXPENSE_TABLE
-    review_table_id_env: FEISHU_BITABLE_REVIEW_TABLE
-    execution_table_id_env: FEISHU_BITABLE_EXECUTION_TABLE
 
 webhook:
   enabled: false
