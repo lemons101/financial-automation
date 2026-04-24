@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Local environments
+.venv/
+venv/
+.env
+.env.*
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+
+# Runtime artifacts
+runtime/output/
+runtime/jobs/
+runtime/models/
+.tmp_tests/
+Automation/.tmp_test/
+
+# Test leftovers
+.pytest_cache/
+.coverage
+
+# Logs
+*.log
