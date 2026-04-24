@@ -47,6 +47,10 @@ def run_skill_job(
         config,
         attachment_paths=[str(path) for path in saved_files],
     )
+    result["bitable_write_plan"] = build_bitable_write_plan(
+        result,
+        attachment_paths=[str(path) for path in saved_files],
+    )
     return result
 
 
@@ -124,6 +128,54 @@ def load_skill_result(run_dir: str | Path) -> dict[str, Any]:
     run_path = Path(run_dir)
     skill_result_path = run_path / "skill_result.json"
     return _read_json(skill_result_path)
+
+
+def build_bitable_write_plan(
+    skill_result: dict[str, Any],
+    *,
+    attachment_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build a user-identity write plan for the current OpenClaw session."""
+    try:
+        from .sync_bitable import (
+            TRANSPORTATION_TYPES,
+            build_expense_record,
+            build_transport_record,
+        )
+    except ImportError:  # pragma: no cover - supports running as a script.
+        from sync_bitable import (  # type: ignore
+            TRANSPORTATION_TYPES,
+            build_expense_record,
+            build_transport_record,
+        )
+
+    documents = skill_result.get("documents", [])
+    plan = {
+        "mode": "user_identity",
+        "include_attachments": False,
+        "records": [],
+    }
+    for document in documents:
+        if not isinstance(document, dict):
+            continue
+        document_type = str(document.get("document_type") or "unknown")
+        if document_type in TRANSPORTATION_TYPES:
+            plan["records"].append(
+                {
+                    "target": "transport",
+                    "fields": build_transport_record(document, []),
+                }
+            )
+        else:
+            plan["records"].append(
+                {
+                    "target": "expense",
+                    "fields": build_expense_record(document, []),
+                }
+            )
+    if attachment_paths:
+        plan["attachment_paths"] = list(attachment_paths)
+    return plan
 
 
 def _make_job_id() -> str:

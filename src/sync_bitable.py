@@ -11,6 +11,16 @@ from typing import Any
 from urllib import error, request
 
 
+EXPENSE_TYPE_LABELS = {
+    "transportation_fee": "🚄 交通报销",
+}
+
+VALIDATION_STATUS_LABELS = {
+    "pass": "✅ 通过",
+    "warning": "⚠️ 待复核",
+    "error": "❌ 异常",
+}
+
 TRANSPORTATION_TYPES = {"transportation_fee"}
 
 TRANSPORT_FIELD_NAMES = {
@@ -34,6 +44,7 @@ TRANSPORT_FIELD_NAMES = {
     "validation_status": "校验状态",
     "needs_review": "是否复核",
     "review_reasons": "复核原因",
+    "summary": "识别摘要",
     "raw_json": "原始JSON",
 }
 
@@ -60,6 +71,7 @@ EXPENSE_FIELD_NAMES = {
     "validation_status": "校验状态",
     "needs_review": "是否复核",
     "review_reasons": "复核原因",
+    "summary": "识别摘要",
     "raw_json": "原始JSON",
 }
 
@@ -74,6 +86,8 @@ class BitableSettings:
     dry_run: bool
     endpoint: str
     batch_size: int
+    mode: str
+    include_attachments: bool
     app_id: str
     app_secret: str
     app_token: str
@@ -87,7 +101,6 @@ def sync_skill_result_with_config(
     *,
     attachment_paths: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Sync a skill_result payload to Feishu Bitable using app config settings."""
     settings = load_bitable_settings(config)
     if not settings.enabled:
         return {
@@ -95,7 +108,6 @@ def sync_skill_result_with_config(
             "status": "disabled",
             "message": "Bitable sync is disabled in configuration.",
         }
-
     return sync_skill_result_to_bitable(
         skill_result,
         settings,
@@ -104,27 +116,24 @@ def sync_skill_result_with_config(
 
 
 def load_bitable_settings(config: dict[str, Any]) -> BitableSettings:
-    """Load Bitable settings from config with environment-variable overrides."""
     bitable = config.get("sync", {}).get("bitable", {})
     endpoint = str(bitable.get("endpoint") or "https://open.feishu.cn").rstrip("/")
     batch_size = int(bitable.get("batch_size") or 200)
-
-    app_id = _resolve_secret(bitable, "app_id")
-    app_secret = _resolve_secret(bitable, "app_secret")
-    app_token = _resolve_secret(bitable, "app_token")
-    transport_table_id = _resolve_secret(bitable, "transport_table_id")
-    expense_table_id = _resolve_secret(bitable, "expense_table_id")
+    mode = str(bitable.get("mode") or "user_identity").strip() or "user_identity"
+    include_attachments = bool(bitable.get("include_attachments", False))
 
     return BitableSettings(
         enabled=bool(bitable.get("enabled", False)),
         dry_run=bool(bitable.get("dry_run", True)),
         endpoint=endpoint,
         batch_size=max(1, min(batch_size, 500)),
-        app_id=app_id,
-        app_secret=app_secret,
-        app_token=app_token,
-        transport_table_id=transport_table_id,
-        expense_table_id=expense_table_id,
+        mode=mode,
+        include_attachments=include_attachments,
+        app_id=_resolve_secret(bitable, "app_id"),
+        app_secret=_resolve_secret(bitable, "app_secret"),
+        app_token=_resolve_secret(bitable, "app_token"),
+        transport_table_id=_resolve_secret(bitable, "transport_table_id"),
+        expense_table_id=_resolve_secret(bitable, "expense_table_id"),
     )
 
 
@@ -134,7 +143,6 @@ def sync_skill_result_to_bitable(
     *,
     attachment_paths: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Write skill_result documents into transport and expense Bitable tables."""
     documents = skill_result.get("documents", [])
     if not isinstance(documents, list):
         raise BitableSyncError("skill_result.documents must be a list.")
@@ -144,19 +152,26 @@ def sync_skill_result_to_bitable(
     expense_records: list[dict[str, Any]] = []
 
     access_token = ""
-    if not settings.dry_run:
+    if not settings.dry_run and settings.mode == "app_identity":
         access_token = get_tenant_access_token(settings)
 
     for document in documents:
         if not isinstance(document, dict):
             continue
-
-        attachment_payload = _build_attachment_field(
-            document=document,
-            settings=settings,
-            access_token=access_token,
-            attachment_index=attachment_index,
-        )
+        attachment_payload: list[dict[str, Any]] | str = _build_attachment_text(document.get("source_file_name"))
+        if settings.include_attachments and settings.mode == "app_identity":
+            source_name = str(document.get("source_file_name") or "")
+            source_path = attachment_index.get(source_name)
+            if source_path:
+                try:
+                    uploaded = upload_attachment(
+                        settings=settings,
+                        access_token=access_token,
+                        file_path=source_path,
+                    )
+                    attachment_payload = [{"file_token": uploaded["file_token"], "name": uploaded["name"]}]
+                except BitableSyncError:
+                    attachment_payload = _build_attachment_text(source_name)
 
         invoice_type = str(document.get("document_type") or "unknown")
         if invoice_type in TRANSPORTATION_TYPES:
@@ -167,8 +182,16 @@ def sync_skill_result_to_bitable(
     summary = {
         "enabled": True,
         "dry_run": settings.dry_run,
-        "status": "dry_run" if settings.dry_run else "completed",
-        "app_token": settings.app_token,
+        "status": "dry_run" if settings.dry_run else (
+            "completed" if settings.mode == "app_identity" else "deferred_to_session_user_identity"
+        ),
+        "mode": settings.mode,
+        "include_attachments": settings.include_attachments,
+        "message": (
+            "Use current OpenClaw session with Feishu user identity to continue real bitable create/update; this preview/prepared result is not task completion by itself."
+            if settings.mode != "app_identity"
+            else "App-identity bitable sync executed."
+        ),
         "tables": {
             "transport": {
                 "table_id": settings.transport_table_id,
@@ -183,9 +206,11 @@ def sync_skill_result_to_bitable(
         },
     }
 
-    if settings.dry_run:
-        summary["tables"]["transport"]["preview"] = transport_records[:3]
-        summary["tables"]["expense"]["preview"] = expense_records[:3]
+    if settings.dry_run or settings.mode != "app_identity":
+        if transport_records:
+            summary["tables"]["transport"]["preview"] = transport_records[:3]
+        if expense_records:
+            summary["tables"]["expense"]["preview"] = expense_records[:3]
         return summary
 
     if transport_records:
@@ -210,7 +235,6 @@ def sync_skill_result_to_bitable(
 
 
 def get_tenant_access_token(settings: BitableSettings) -> str:
-    """Fetch a tenant access token for the configured Feishu app."""
     if not settings.app_id or not settings.app_secret:
         raise BitableSyncError("Missing FEISHU_APP_ID or FEISHU_APP_SECRET.")
 
@@ -234,7 +258,6 @@ def batch_create_records(
     table_id: str,
     records: list[dict[str, Any]],
 ) -> int:
-    """Write records to a Feishu Bitable table in batches."""
     if not table_id:
         raise BitableSyncError("Missing Bitable table_id.")
 
@@ -260,7 +283,6 @@ def upload_attachment(
     access_token: str,
     file_path: str | Path,
 ) -> dict[str, Any]:
-    """Upload a local receipt file to Feishu so it can be attached in Bitable."""
     path = Path(file_path)
     if not path.exists():
         raise BitableSyncError(f"Attachment file does not exist: {path}")
@@ -292,160 +314,172 @@ def upload_attachment(
     }
 
 
-def build_transport_record(
-    document: dict[str, Any],
-    attachment_payload: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Map a skill document into the transport reimbursement table schema."""
-    extraction = _ensure_dict(document.get("extraction"))
-    doc = _ensure_dict(extraction.get("document"))
-    buyer = _ensure_dict(extraction.get("buyer"))
-    travel = _ensure_dict(extraction.get("travel"))
-    passenger = _ensure_dict(extraction.get("passenger"))
-    validation = _ensure_dict(document.get("validation"))
-    review = _ensure_dict(document.get("review"))
+def build_transport_record(document: dict[str, Any], attachment_payload: list[dict[str, Any]] | str) -> dict[str, Any]:
+    extraction = document.get("extraction", {}) or {}
+    doc_info = extraction.get("document", {}) or {}
+    buyer = extraction.get("buyer", {}) or {}
+    travel = extraction.get("travel", {}) or {}
+    passenger = extraction.get("passenger", {}) or {}
+    validation = document.get("validation", {}) or {}
+    review = document.get("review", {}) or {}
+    source_file_name = document.get("source_file_name")
 
-    fields = {
+    fields: dict[str, Any] = {
         TRANSPORT_FIELD_NAMES["doc_id"]: document.get("doc_id"),
-        TRANSPORT_FIELD_NAMES["expense_type"]: _map_expense_type(document.get("document_type")),
-        TRANSPORT_FIELD_NAMES["source_file_name"]: document.get("source_file_name"),
-        TRANSPORT_FIELD_NAMES["attachment"]: attachment_payload or [],
-        TRANSPORT_FIELD_NAMES["invoice_number"]: doc.get("invoice_number"),
-        TRANSPORT_FIELD_NAMES["amount"]: doc.get("amount"),
-        TRANSPORT_FIELD_NAMES["currency"]: doc.get("currency"),
+        TRANSPORT_FIELD_NAMES["expense_type"]: _map_expense_type_label(document.get("document_type")),
+        TRANSPORT_FIELD_NAMES["source_file_name"]: source_file_name,
+        TRANSPORT_FIELD_NAMES["attachment"]: attachment_payload or _build_attachment_text(source_file_name),
+        TRANSPORT_FIELD_NAMES["invoice_number"]: doc_info.get("invoice_number"),
+        TRANSPORT_FIELD_NAMES["amount"]: doc_info.get("amount"),
+        TRANSPORT_FIELD_NAMES["currency"]: doc_info.get("currency"),
         TRANSPORT_FIELD_NAMES["buyer_name"]: buyer.get("name"),
         TRANSPORT_FIELD_NAMES["buyer_tax_id"]: buyer.get("tax_id"),
         TRANSPORT_FIELD_NAMES["passenger_name"]: passenger.get("name"),
         TRANSPORT_FIELD_NAMES["transport_number"]: travel.get("transport_number"),
         TRANSPORT_FIELD_NAMES["from_station"]: travel.get("from_station"),
         TRANSPORT_FIELD_NAMES["to_station"]: travel.get("to_station"),
-        TRANSPORT_FIELD_NAMES["travel_date"]: _date_to_bitable_timestamp(travel.get("travel_date")),
+        TRANSPORT_FIELD_NAMES["travel_date"]: _date_to_millis(travel.get("travel_date")),
         TRANSPORT_FIELD_NAMES["departure_time"]: travel.get("departure_time"),
         TRANSPORT_FIELD_NAMES["seat_no"]: passenger.get("seat_no"),
         TRANSPORT_FIELD_NAMES["seat_class"]: passenger.get("seat_class"),
-        TRANSPORT_FIELD_NAMES["validation_status"]: validation.get("status"),
+        TRANSPORT_FIELD_NAMES["validation_status"]: _map_validation_status(validation.get("status")),
         TRANSPORT_FIELD_NAMES["needs_review"]: bool(review.get("needs_review")),
-        TRANSPORT_FIELD_NAMES["review_reasons"]: _join_lines(review.get("reasons")),
-        TRANSPORT_FIELD_NAMES["raw_json"]: _pretty_json(document),
+        TRANSPORT_FIELD_NAMES["review_reasons"]: _format_review_reasons(review.get("reasons")),
+        TRANSPORT_FIELD_NAMES["summary"]: _build_transport_summary(document),
+        TRANSPORT_FIELD_NAMES["raw_json"]: json.dumps(document, ensure_ascii=False),
     }
-    return {"fields": _drop_none(fields)}
+    return _drop_none(fields)
 
 
-def build_expense_record(
-    document: dict[str, Any],
-    attachment_payload: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Map a skill document into the expense reimbursement table schema."""
-    extraction = _ensure_dict(document.get("extraction"))
-    doc = _ensure_dict(extraction.get("document"))
-    buyer = _ensure_dict(extraction.get("buyer"))
-    seller = _ensure_dict(extraction.get("seller"))
-    validation = _ensure_dict(document.get("validation"))
-    review = _ensure_dict(document.get("review"))
-    line_items = extraction.get("line_items", [])
-    first_line = line_items[0] if isinstance(line_items, list) and line_items else {}
-    first_line = _ensure_dict(first_line)
+def build_expense_record(document: dict[str, Any], attachment_payload: list[dict[str, Any]] | str) -> dict[str, Any]:
+    extraction = document.get("extraction", {}) or {}
+    doc_info = extraction.get("document", {}) or {}
+    buyer = extraction.get("buyer", {}) or {}
+    seller = extraction.get("seller", {}) or {}
+    line_items = extraction.get("line_items", []) or []
+    first_item = line_items[0] if line_items else {}
+    validation = document.get("validation", {}) or {}
+    review = document.get("review", {}) or {}
+    source_file_name = document.get("source_file_name")
 
-    fields = {
+    fields: dict[str, Any] = {
         EXPENSE_FIELD_NAMES["doc_id"]: document.get("doc_id"),
-        EXPENSE_FIELD_NAMES["expense_type"]: _map_expense_type(document.get("document_type")),
-        EXPENSE_FIELD_NAMES["source_file_name"]: document.get("source_file_name"),
-        EXPENSE_FIELD_NAMES["attachment"]: attachment_payload or [],
-        EXPENSE_FIELD_NAMES["invoice_number"]: doc.get("invoice_number"),
-        EXPENSE_FIELD_NAMES["issue_date"]: _date_to_bitable_timestamp(doc.get("issue_date")),
-        EXPENSE_FIELD_NAMES["amount"]: doc.get("amount"),
-        EXPENSE_FIELD_NAMES["currency"]: doc.get("currency"),
+        EXPENSE_FIELD_NAMES["expense_type"]: _map_expense_type_label(document.get("document_type")),
+        EXPENSE_FIELD_NAMES["source_file_name"]: source_file_name,
+        EXPENSE_FIELD_NAMES["attachment"]: attachment_payload or _build_attachment_text(source_file_name),
+        EXPENSE_FIELD_NAMES["invoice_number"]: doc_info.get("invoice_number"),
+        EXPENSE_FIELD_NAMES["issue_date"]: _date_to_millis(doc_info.get("issue_date")),
+        EXPENSE_FIELD_NAMES["amount"]: doc_info.get("amount"),
+        EXPENSE_FIELD_NAMES["currency"]: doc_info.get("currency"),
         EXPENSE_FIELD_NAMES["buyer_name"]: buyer.get("name"),
         EXPENSE_FIELD_NAMES["buyer_tax_id"]: buyer.get("tax_id"),
         EXPENSE_FIELD_NAMES["seller_name"]: seller.get("name"),
         EXPENSE_FIELD_NAMES["seller_tax_id"]: seller.get("tax_id"),
-        EXPENSE_FIELD_NAMES["item_name"]: first_line.get("item_name"),
-        EXPENSE_FIELD_NAMES["quantity"]: first_line.get("quantity"),
-        EXPENSE_FIELD_NAMES["unit_price"]: first_line.get("unit_price"),
-        EXPENSE_FIELD_NAMES["line_amount"]: first_line.get("line_amount"),
-        EXPENSE_FIELD_NAMES["tax_rate"]: first_line.get("tax_rate"),
-        EXPENSE_FIELD_NAMES["tax_amount"]: first_line.get("tax_amount"),
-        EXPENSE_FIELD_NAMES["line_items_json"]: _pretty_json(line_items),
-        EXPENSE_FIELD_NAMES["validation_status"]: validation.get("status"),
+        EXPENSE_FIELD_NAMES["item_name"]: first_item.get("item_name"),
+        EXPENSE_FIELD_NAMES["quantity"]: first_item.get("quantity"),
+        EXPENSE_FIELD_NAMES["unit_price"]: first_item.get("unit_price"),
+        EXPENSE_FIELD_NAMES["line_amount"]: first_item.get("line_amount"),
+        EXPENSE_FIELD_NAMES["tax_rate"]: first_item.get("tax_rate"),
+        EXPENSE_FIELD_NAMES["tax_amount"]: first_item.get("tax_amount"),
+        EXPENSE_FIELD_NAMES["line_items_json"]: json.dumps(line_items, ensure_ascii=False),
+        EXPENSE_FIELD_NAMES["validation_status"]: _map_validation_status(validation.get("status")),
         EXPENSE_FIELD_NAMES["needs_review"]: bool(review.get("needs_review")),
-        EXPENSE_FIELD_NAMES["review_reasons"]: _join_lines(review.get("reasons")),
-        EXPENSE_FIELD_NAMES["raw_json"]: _pretty_json(document),
+        EXPENSE_FIELD_NAMES["review_reasons"]: _format_review_reasons(review.get("reasons")),
+        EXPENSE_FIELD_NAMES["summary"]: _build_expense_summary(document),
+        EXPENSE_FIELD_NAMES["raw_json"]: json.dumps(document, ensure_ascii=False),
     }
-    return {"fields": _drop_none(fields)}
+    return _drop_none(fields)
 
 
-def _resolve_secret(bitable: dict[str, Any], key: str) -> str:
-    direct_value = bitable.get(key)
-    if direct_value not in (None, ""):
-        return str(direct_value)
-
-    env_name = bitable.get(f"{key}_env")
-    if env_name:
-        return os.getenv(str(env_name), "")
+def _resolve_secret(section: dict[str, Any], key: str) -> str:
+    direct_value = section.get(key)
+    if isinstance(direct_value, str) and direct_value.strip():
+        return direct_value.strip()
+    env_key = section.get(f"{key}_env")
+    if isinstance(env_key, str) and env_key.strip():
+        return os.environ.get(env_key.strip(), "").strip()
     return ""
 
 
-def _build_attachment_index(attachment_paths: list[str]) -> dict[str, str]:
+def _build_attachment_index(paths: list[str]) -> dict[str, str]:
     index: dict[str, str] = {}
-    for raw_path in attachment_paths:
-        path = Path(str(raw_path))
-        if not path.exists():
-            continue
-        index[path.name] = str(path)
+    for raw in paths:
+        name = os.path.basename(raw)
+        index[name] = raw
     return index
 
 
-def _build_attachment_field(
-    *,
-    document: dict[str, Any],
-    settings: BitableSettings,
-    access_token: str,
-    attachment_index: dict[str, str],
-) -> list[dict[str, Any]]:
-    source_path = str(document.get("source_file_path") or "").strip()
-    if not source_path:
-        source_name = str(document.get("source_file_name") or "").strip()
-        source_path = attachment_index.get(source_name, "")
-
-    if not source_path:
-        return []
-
-    if settings.dry_run:
-        return [{"name": Path(source_path).name}]
-
-    uploaded = upload_attachment(
-        settings=settings,
-        access_token=access_token,
-        file_path=source_path,
-    )
-    return [{"file_token": uploaded["file_token"], "name": uploaded["name"]}]
-
-
-def _map_expense_type(document_type: Any) -> str:
-    value = str(document_type or "unknown")
-    if value in TRANSPORTATION_TYPES:
-        return "交通报销"
-
-    mapping = {
-        "conference_fee": "会议报销",
-        "accommodation_fee": "酒店报销",
-        "catering_fee": "餐饮报销",
-        "office_supply_fee": "办公报销",
-        "vat_invoice": "费用报销",
-        "unknown": "费用报销",
-    }
-    return mapping.get(value, "费用报销")
-
-
-def _date_to_bitable_timestamp(value: Any) -> int | None:
-    raw = str(value or "").strip()
-    if not raw:
+def _date_to_millis(value: Any) -> int | None:
+    if not value:
         return None
+    if isinstance(value, (int, float)):
+        return int(value)
     try:
-        parsed = datetime.strptime(raw, "%Y-%m-%d")
+        dt = datetime.fromisoformat(str(value))
     except ValueError:
         return None
-    return int(parsed.timestamp() * 1000)
+    return int(dt.timestamp() * 1000)
+
+
+def _join_review_reasons(reasons: Any) -> str:
+    if isinstance(reasons, list):
+        return ", ".join(str(item) for item in reasons if item)
+    if reasons:
+        return str(reasons)
+    return ""
+
+
+def _map_expense_type_label(value: Any) -> str:
+    raw = str(value or "unknown").strip()
+    return EXPENSE_TYPE_LABELS.get(raw, "🧾 费用报销")
+
+
+def _map_validation_status(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    return VALIDATION_STATUS_LABELS.get(raw, raw or "⚪ 未知")
+
+
+def _build_attachment_text(source_file_name: Any) -> str:
+    name = str(source_file_name or "").strip()
+    if not name:
+        return "📎 原图已接收，待挂载"
+    return f"🖼️ 原图已接收：{name}"
+
+
+def _format_review_reasons(reasons: Any) -> str:
+    text = _join_review_reasons(reasons)
+    if not text:
+        return ""
+    return f"👀 {text}"
+
+
+def _build_transport_summary(document: dict[str, Any]) -> str:
+    extraction = document.get("extraction", {}) or {}
+    doc_info = extraction.get("document", {}) or {}
+    travel = extraction.get("travel", {}) or {}
+    passenger = extraction.get("passenger", {}) or {}
+    amount = doc_info.get("amount")
+    amount_text = f"¥{amount:g}" if isinstance(amount, (int, float)) else ""
+    route = " → ".join(part for part in [travel.get("from_station"), travel.get("to_station")] if part)
+    parts = ["🚄"]
+    for value in [passenger.get("name"), travel.get("transport_number"), route, amount_text]:
+        if value:
+            parts.append(str(value))
+    return "｜".join(parts)
+
+
+def _build_expense_summary(document: dict[str, Any]) -> str:
+    extraction = document.get("extraction", {}) or {}
+    doc_info = extraction.get("document", {}) or {}
+    line_items = extraction.get("line_items", []) or []
+    first_item = line_items[0] if line_items else {}
+    amount = doc_info.get("amount")
+    amount_text = f"¥{amount:g}" if isinstance(amount, (int, float)) else ""
+    parts = ["🧾"]
+    for value in [first_item.get("item_name"), amount_text, doc_info.get("issue_date")]:
+        if value:
+            parts.append(str(value))
+    return "｜".join(parts)
 
 
 def _drop_none(fields: dict[str, Any]) -> dict[str, Any]:
@@ -453,7 +487,7 @@ def _drop_none(fields: dict[str, Any]) -> dict[str, Any]:
     for key, value in fields.items():
         if value is None:
             continue
-        if isinstance(value, str) and not value.strip():
+        if value == []:
             continue
         cleaned[key] = value
     return cleaned
@@ -461,20 +495,6 @@ def _drop_none(fields: dict[str, Any]) -> dict[str, Any]:
 
 def _chunk_records(records: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
     return [records[index : index + size] for index in range(0, len(records), size)]
-
-
-def _join_lines(values: Any) -> str:
-    if not isinstance(values, list):
-        return str(values or "")
-    return "\n".join(str(item) for item in values if str(item).strip())
-
-
-def _pretty_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, indent=2)
-
-
-def _ensure_dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
 
 
 def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:

@@ -36,14 +36,17 @@ apt-get update && apt-get install -y libgl1
 ```
 
 ### 3.2 执行处理
-1) 放置样例发票到输入目录  
-2) 优先使用统一入口执行：
+1) 将运行凭据放到项目根目录的 `.env`（例如 `/root/projects/financial-automation/.env`），统一由项目入口按需加载。  
+2) 放置样例发票到输入目录  
+3) 优先使用统一入口执行：
 
 ```bash
 /root/projects/financial-automation/bin/run_skill_job /path/to/invoice.pdf
 ```
 
-3) 如需直接调用 Python，请优先使用：
+该入口会在当前执行进程内自动加载项目目录下的 `.env`，不会污染其他项目。 
+
+4) 如需直接调用 Python，请优先使用：
 
 ```bash
 /root/projects/financial-automation/.venv/bin/python
@@ -56,14 +59,52 @@ apt-get update && apt-get install -y libgl1
 - `runtime/.../run_summary.json`
 
 ## 4. Bitable 同步
-### 4.1 Dry-run
-- 先执行 dry-run，检查字段映射与样本数据
-- 确认主表/复核表字段名一致
+### 4.1 当前推荐架构（重要）
+当前项目的**主链路**建议拆成两段：
 
-### 4.2 Real-run
-- 设置飞书环境变量
-- 执行真实写入
-- 核对新增/更新数量与幂等键行为
+1. `financial-automation` project 负责：
+   - OCR / PDF 解析
+   - 票据类型判断
+   - 结构化字段提取
+   - 输出 `bitable_write_plan`
+2. 当前 OpenClaw 会话负责：
+   - 使用**用户身份**调用飞书多维表格工具
+   - 按 `bitable_write_plan.records` 写入交通报销表 / 费用报销表
+
+原因：
+- 应用身份（App ID / App Secret）当前可读表，但 real-run 写 record / 上传附件仍会被飞书拒绝
+- 用户身份已经验证可成功写入记录
+- 用户授权卡片、授权完成通知、重试逻辑都天然发生在当前会话内，更适合放在 OpenClaw 侧处理
+
+### 4.2 Dry-run
+- 先执行 dry-run，检查字段映射与样本数据
+- 确认 `bitable_write_plan.records` 中的目标表与字段 payload 正确
+- 确认主表字段名与映射一致
+
+### 4.3 Real-run（推荐：用户身份）
+- 通过 `bin/run_skill_job` 或 `src/skill_entry.py` 运行识别
+- 从返回结果中读取：
+  - `documents`
+  - `review_queue`
+  - `bitable_write_plan`
+- 由当前 OpenClaw 会话使用用户身份工具执行录入：
+  - 交通类 → `交通报销表`
+  - 费用类 → `费用报销表`
+- 若飞书要求用户授权，按卡片完成授权后重试
+
+### 4.4 应用身份同步（仅保留为备用/实验链路）
+- 在项目 `.env` 中提供以下变量：
+  - `FEISHU_APP_ID`
+  - `FEISHU_APP_SECRET`
+  - `FEISHU_BITABLE_APP_TOKEN`
+  - `FEISHU_BITABLE_TRANSPORT_TABLE`
+  - `FEISHU_BITABLE_EXPENSE_TABLE`
+- 该链路当前不建议作为默认 real-run 主方案
+- 现状：
+  - 可拿 `tenant_access_token`
+  - 可访问 bitable app / 列表表
+  - 但写 record 会报 `403 / 91403`
+  - 附件上传会报 `403 / 1061004`
 
 ## 5. 飞书 webhook 模式
 1) 启动 webhook 服务（后续以 `src/webhook.py` 为准）  
