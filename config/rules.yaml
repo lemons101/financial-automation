@@ -56,7 +56,7 @@ compliance:
     allow_warning_auto_pass: false
 
 review_policy:
-  image_ocr_requires_review: true
+  image_ocr_requires_review: false
   missing_required_field_requires_review: true
   amount_exceeds_limit_requires_review: true
   duplicate_invoice_requires_review: true
