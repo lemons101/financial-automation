@@ -10,13 +10,32 @@ description: Process uploaded expense attachments into structured finance result
 Run the local Financial Automation pipeline against uploaded receipts and return structured expense results.
 Use this skill for the current first-version scope: normal electronic invoices and railway e-tickets.
 
+## Repository Location
+
+This skill expects the full project repository to exist on the same machine.
+
+Resolve the project root in this order:
+
+1. Use `FINANCIAL_AUTOMATION_ROOT` if it is set.
+2. Otherwise check these common paths:
+   - `~/projects/financial-automation`
+   - `~/.openclaw/workspace/financial-automation`
+   - `/root/projects/financial-automation`
+
+If none of these paths exists, stop and tell the user the repository has not been deployed to the server yet.
+
+After locating the repository root, use:
+- `<repo_root>/src/skill_entry.py`
+- `<repo_root>/config/app_config.yaml`
+
 ## Workflow
 
-1. Convert incoming files into the attachment payload expected by [skill_entry.py](../../src/skill_entry.py).
-2. Call `run_skill_job(...)` instead of manually chaining ingest, OCR, validate, and formatter steps.
-3. Use the returned `skill_result` payload as the main response object.
-4. When summarizing for users, prefer `user_summary` and `highlights` over raw OCR fields.
-5. When downstream systems need structured records, use `documents` and `review_queue`.
+1. Locate the repository root first.
+2. Convert incoming files into the attachment payload expected by `src/skill_entry.py`.
+3. Call `run_skill_job(...)` instead of manually chaining ingest, OCR, validate, and formatter steps.
+4. Use the returned `skill_result` payload as the main response object.
+5. When summarizing for users, prefer `user_summary` and `highlights` over raw OCR fields.
+6. When downstream systems need structured records, use `documents` and `review_queue`.
 
 ## Inputs
 
@@ -46,7 +65,7 @@ If no supported files remain, stop and tell the user no valid expense attachment
 
 ## Entry Point
 
-Use [skill_entry.py](../../src/skill_entry.py:1) as the only skill execution entry point.
+Use `<repo_root>/src/skill_entry.py` as the only skill execution entry point.
 
 Primary call:
 
@@ -61,8 +80,14 @@ Optional override:
 ```python
 result = run_skill_job(
     attachments,
-    config_path="D:/Openclaw/Financial Automation/config/app_config.yaml",
+    config_path=f"{repo_root}/config/app_config.yaml",
 )
+```
+
+Example repository root on a cloud server:
+
+```python
+repo_root = "/root/projects/financial-automation"
 ```
 
 ## Outputs
@@ -82,6 +107,18 @@ Use these output files only when deeper inspection is needed:
 - `skill_review_queue.json`
 - `skill_result.json`
 - `run_summary.json`
+
+## Deployment Note
+
+Recommended cloud layout:
+
+```text
+/root/projects/financial-automation
+~/.openclaw/workspace/skills/financial-expense-automation
+```
+
+The repository stores the pipeline code.
+The skill directory stores the `SKILL.md` and agent metadata that tell OpenClaw how to use the pipeline.
 
 ## Current Scope
 
