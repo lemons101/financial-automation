@@ -6,9 +6,13 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from .bitable_attachment_uploader import build_bitable_attachment_upload_request
+    from .bitable_session_writer import choose_bitable_write_action
     from .main import DEFAULT_CONFIG_PATH, load_app_config, run_pipeline
     from .sync_bitable import sync_skill_result_with_config
 except ImportError:  # pragma: no cover - supports running as a script.
+    from bitable_attachment_uploader import build_bitable_attachment_upload_request
+    from bitable_session_writer import choose_bitable_write_action
     from main import DEFAULT_CONFIG_PATH, load_app_config, run_pipeline
     from sync_bitable import sync_skill_result_with_config
 
@@ -50,6 +54,8 @@ def run_skill_job(
     result["bitable_write_plan"] = build_bitable_write_plan(
         result,
         attachment_paths=[str(path) for path in saved_files],
+        app_token=_extract_bitable_app_token(config),
+        config=config,
     )
     return result
 
@@ -134,6 +140,8 @@ def build_bitable_write_plan(
     skill_result: dict[str, Any],
     *,
     attachment_paths: list[str] | None = None,
+    app_token: str | None = None,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a user-identity write plan for the current OpenClaw session."""
     try:
@@ -150,9 +158,33 @@ def build_bitable_write_plan(
         )
 
     documents = skill_result.get("documents", [])
+    attachment_request = build_bitable_attachment_upload_request(
+        app_token=app_token or "",
+        attachment_paths=attachment_paths,
+    )
+    bitable_config = (config or {}).get("sync", {}).get("bitable", {}) if isinstance(config, dict) else {}
+    transport_table_id = _extract_bitable_table_id(bitable_config, "transport_table_id")
+    expense_table_id = _extract_bitable_table_id(bitable_config, "expense_table_id")
+
     plan = {
         "mode": "user_identity",
         "include_attachments": False,
+        "write_policy": {
+            "preferred": "update_first_blank_row_then_create",
+            "blank_row_rule": "reuse first record whose doc_id is empty; create only when none found",
+        },
+        "attachment_strategy": "upload_to_bitable_context_first",
+        "attachment_upload_handoff": {
+            "required": bool(attachment_request),
+            "supported_by_current_project": False,
+            "status": "pending_external_uploader" if attachment_request else "not_needed",
+            "reason": "Bitable attachment fields reject generic Drive uploads; files must be uploaded into the current bitable context before writing file_token.",
+            "recommended_tool": "feishu_drive_media",
+            "recommended_params": {
+                "action": "upload",
+                "parent_type": "bitable_image"
+            }
+        },
         "records": [],
     }
     for document in documents:
@@ -163,19 +195,55 @@ def build_bitable_write_plan(
             plan["records"].append(
                 {
                     "target": "transport",
+                    "table_id": transport_table_id,
                     "fields": build_transport_record(document, []),
+                    "write_action": choose_bitable_write_action([]),
                 }
             )
         else:
             plan["records"].append(
                 {
                     "target": "expense",
+                    "table_id": expense_table_id,
                     "fields": build_expense_record(document, []),
+                    "write_action": choose_bitable_write_action([]),
                 }
             )
     if attachment_paths:
         plan["attachment_paths"] = list(attachment_paths)
+        plan["attachment_upload_handoff"]["attachment_paths"] = list(attachment_paths)
+    if attachment_request:
+        plan["attachment_upload_handoff"]["request"] = {
+            "app_token": attachment_request.app_token,
+            "attachment_paths": list(attachment_request.attachment_paths),
+            "provider": attachment_request.provider,
+            "parent_type": attachment_request.parent_type,
+        }
     return plan
+
+
+def _extract_bitable_app_token(config: dict[str, Any]) -> str | None:
+    bitable = config.get("sync", {}).get("bitable", {}) if isinstance(config, dict) else {}
+    raw = bitable.get("app_token")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    env_key = bitable.get("app_token_env")
+    if isinstance(env_key, str) and env_key.strip():
+        import os
+        return os.environ.get(env_key.strip())
+    return None
+
+
+def _extract_bitable_table_id(bitable_config: dict[str, Any], key: str) -> str | None:
+    raw = bitable_config.get(key)
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    env_key = bitable_config.get(f"{key}_env")
+    if isinstance(env_key, str) and env_key.strip():
+        import os
+        value = os.environ.get(env_key.strip(), "").strip()
+        return value or None
+    return None
 
 
 def _make_job_id() -> str:

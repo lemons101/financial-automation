@@ -530,15 +530,26 @@ class BitableWritePlanSmokeTest(unittest.TestCase):
             skill_result,
             attachment_paths=["/tmp/ticket.jpg"],
             app_token="app_token_xxx",
+            config={
+                "sync": {
+                    "bitable": {
+                        "transport_table_id": "tbl_transport",
+                        "expense_table_id": "tbl_expense",
+                    }
+                }
+            },
         )
         self.assertEqual(plan["mode"], "user_identity")
         self.assertFalse(plan["include_attachments"])
+        self.assertEqual(plan["write_policy"]["preferred"], "update_first_blank_row_then_create")
         self.assertEqual(plan["attachment_strategy"], "upload_to_bitable_context_first")
         self.assertTrue(plan["attachment_upload_handoff"]["required"])
         self.assertEqual(plan["attachment_upload_handoff"]["status"], "pending_external_uploader")
         self.assertEqual(plan["attachment_upload_handoff"]["request"]["app_token"], "app_token_xxx")
         self.assertEqual(plan["attachment_upload_handoff"]["request"]["parent_type"], "bitable_image")
         self.assertEqual(plan["attachment_upload_handoff"]["attachment_paths"], ["/tmp/ticket.jpg"])
+        self.assertEqual(plan["records"][0]["table_id"], "tbl_transport")
+        self.assertEqual(plan["records"][0]["write_action"], {"action": "create"})
 
 
 class BitableSyncSmokeTest(unittest.TestCase):
