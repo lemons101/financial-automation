@@ -1,45 +1,90 @@
 ---
 name: financial-expense-automation
-description: Process uploaded expense attachments into structured finance results for reimbursement workflows. Use when users provide PDF, JPG, JPEG, or PNG receipts in OpenClaw or Feishu and need extracted invoice or rail-ticket fields, validation status, review queue output, or a skill-friendly batch result.
+description: 识别用户上传的报销附件，提取结构化字段，并按报销类型写入飞书多维表格。
 ---
 
-# Financial Expense Automation
+# 财务报销自动化
 
-## Overview
+## 功能说明
 
-Run the local Financial Automation pipeline against uploaded receipts and return structured expense results.
-Use this skill for the current first-version scope: normal electronic invoices and railway e-tickets.
+这个 skill 用于处理用户上传的报销附件，并完成一条完整链路：
 
-## Repository Location
+1. 接收 PDF、JPG、JPEG、PNG 格式的票据附件
+2. 调用本项目的财务识别流水线提取结构化信息
+3. 判断票据属于交通报销还是费用报销
+4. 优先使用 OpenClaw 当前用户权限下可用的飞书多维表格能力写入目标表
+5. 最后把识别结果、写表结果、是否需要人工复核返回给用户
 
-This skill expects the full project repository to exist on the same machine.
+当前第一版已支持并完成接入的核心范围：
+- 费用类电子发票识别
+- 交通类票据识别
 
-Resolve the project root in this order:
+其中当前最稳定的场景包括：
+- 会议费相关电子发票
+- 住宿/酒店相关电子发票
+- 铁路电子客票
 
-1. Use `FINANCIAL_AUTOMATION_ROOT` if it is set.
-2. Otherwise check these common paths:
+## 仓库位置
+
+这个 skill 依赖完整项目仓库，不能只单独拷贝 `SKILL.md` 使用。
+
+按以下顺序定位项目根目录：
+
+1. 如果设置了 `FINANCIAL_AUTOMATION_ROOT`，优先使用它
+2. 否则依次检查这些常见路径：
    - `~/projects/financial-automation`
    - `~/.openclaw/workspace/financial-automation`
    - `/root/projects/financial-automation`
 
-If none of these paths exists, stop and tell the user the repository has not been deployed to the server yet.
+如果这些路径都不存在，应直接告诉用户：服务器上还没有部署完整项目仓库。
 
-After locating the repository root, use:
+找到根目录后，主要使用：
 - `<repo_root>/src/skill_entry.py`
 - `<repo_root>/config/app_config.yaml`
 
-## Workflow
+## 执行流程
 
-1. Locate the repository root first.
-2. Convert incoming files into the attachment payload expected by `src/skill_entry.py`.
-3. Call `run_skill_job(...)` instead of manually chaining ingest, OCR, validate, and formatter steps.
-4. Use the returned `skill_result` payload as the main response object.
-5. When summarizing for users, prefer `user_summary` and `highlights` over raw OCR fields.
-6. When downstream systems need structured records, use `documents` and `review_queue`.
+1. 先定位项目根目录。
+2. 把用户上传的附件整理成 `src/skill_entry.py` 所需的 `attachments` 结构。
+3. 调用 `run_skill_job(...)`，不要手动分别调用 ingest、OCR、validate、formatter。
+4. 以返回的 `skill_result` 作为主结果对象。
+5. 如果需要写入飞书多维表格，优先使用 OpenClaw 当前用户权限下可用的 `feishu-bitable` 能力。
+6. 根据票据类型决定写入目标表：
+   - `transportation_fee` 写入 `交通报销表`
+   - 其他费用类票据写入 `费用报销表`
+7. 写入时尽量同时带上：
+   - 结构化字段
+   - 原始附件
+   - 是否需要人工复核
+8. 最后回复用户：
+   - 识别摘要
+   - 写入了哪张表
+   - 是否写入成功
+   - 是否需要人工复核
 
-## Inputs
+## 写表策略
 
-Build attachments as a list of dictionaries in one of these shapes:
+优先策略：
+- 使用 OpenClaw 当前用户权限下的飞书多维表格能力完成写表
+- 这样更符合你当前的使用方式，也更方便控制权限边界
+
+备选策略：
+- 如果当前环境明确要求走项目后端直连飞书 OpenAPI，也可以使用项目中的 Bitable 同步逻辑
+- 但默认不要把“后端应用权限直写”当成第一选择
+
+## 内置提示思路
+
+当识别完成后，skill 应按下面的意图继续执行，而不是只停留在提取结果：
+
+`请将本次识别结果按报销类型写入飞书多维表格。交通类写入交通报销表，费用类写入费用报销表，并尽量把原始附件一并写入票据附件字段。`
+
+如果需要向 OpenClaw 明确说明动作，可使用这一类中文指令继续推进：
+
+`请使用当前用户权限下可用的飞书多维表格能力，把识别结果写入对应表格，并返回写入状态。`
+
+## 输入格式
+
+附件应整理成如下列表结构之一：
 
 ```python
 [
@@ -54,20 +99,20 @@ Build attachments as a list of dictionaries in one of these shapes:
 ]
 ```
 
-Supported file types:
+支持的文件类型：
 - `.pdf`
 - `.jpg`
 - `.jpeg`
 - `.png`
 
-Ignore unsupported files instead of trying to force them through OCR.
-If no supported files remain, stop and tell the user no valid expense attachments were provided.
+对于不支持的文件类型，直接忽略，不要强行 OCR。
+如果过滤后没有可用附件，应直接告诉用户：没有收到可处理的报销附件。
 
-## Entry Point
+## 入口
 
-Use `<repo_root>/src/skill_entry.py` as the only skill execution entry point.
+唯一入口使用 `<repo_root>/src/skill_entry.py`。
 
-Primary call:
+标准调用方式：
 
 ```python
 from src.skill_entry import run_skill_job
@@ -75,7 +120,7 @@ from src.skill_entry import run_skill_job
 result = run_skill_job(attachments)
 ```
 
-Optional override:
+如有需要，也可以显式传入配置文件：
 
 ```python
 result = run_skill_job(
@@ -84,17 +129,17 @@ result = run_skill_job(
 )
 ```
 
-Example repository root on a cloud server:
+云端常见仓库路径示例：
 
 ```python
 repo_root = "/root/projects/financial-automation"
 ```
 
-## Outputs
+## 输出结果
 
-The returned object is the contents of `skill_result.json` plus job metadata.
+返回对象本质上就是 `skill_result.json` 加上一些 job 元数据。
 
-Most important fields:
+最重要的字段有：
 - `user_summary`
 - `summary`
 - `highlights`
@@ -102,45 +147,52 @@ Most important fields:
 - `review_queue`
 - `job`
 
-Use these output files only when deeper inspection is needed:
+只有在需要深入排查时，才查看这些输出文件：
 - `skill_json/*.json`
 - `skill_review_queue.json`
 - `skill_result.json`
 - `run_summary.json`
 
-## Deployment Note
+## 部署说明
 
-Recommended cloud layout:
+推荐的云端目录布局：
 
 ```text
 /root/projects/financial-automation
 ~/.openclaw/workspace/skills/financial-expense-automation
 ```
 
-The repository stores the pipeline code.
-The skill directory stores the `SKILL.md` and agent metadata that tell OpenClaw how to use the pipeline.
+项目仓库存放流水线代码。  
+skill 目录存放 `SKILL.md` 和 agent 配置，用来告诉 OpenClaw 如何使用这套能力。
 
-## Current Scope
+## 当前能力范围
 
-Supported document types:
-- Normal electronic invoices
-- Railway e-tickets
+当前支持的业务分类：
+- `conference_fee`：会议、会务、注册费、培训费等费用类发票
+- `accommodation_fee`：住宿、酒店、房费等费用类发票
+- `transportation_fee`：交通类票据，当前铁路电子客票识别最稳定
+- `unknown`：暂时无法稳定归类的票据，仍会尽量提取通用字段并进入复核流程
 
-Current extraction highlights:
-- Invoice number, issue date, amount, invoice type
-- Buyer and seller identities for invoices
-- Invoice line item totals, tax rate, tax amount
-- Railway buyer, route, train number, passenger, travel date, departure time, seat fields
-- Validation findings and review reasons
+当前重点提取字段：
+- 发票号码、开票日期、金额、票据类型
+- 发票购买方、销售方信息
+- 发票项目名称、数量、单价、项目金额、税率、税额
+- 火车票购票主体、税号、车次、出发站、到达站、乘车日期、发车时间、乘车人、座位信息
+- 校验结果与复核原因
 
-## Response Guidance
+说明：
+- 交通类里目前最成熟的是铁路电子客票
+- 费用类里目前最成熟的是会议费、住宿费相关发票
+- 对于其他尚未稳定模板化的票据，会先保留结构化提取结果，并通过复核机制兜底
 
-When replying in chat:
-- Lead with `user_summary.headline`
-- If `review_queue` is non-empty, call out each review item and its reasons
-- For invoice requests, summarize buyer, seller, amount, and line item headline
-- For rail tickets, summarize buyer, route, travel date, passenger, and seat info
+## 回复方式
 
-When syncing to a downstream table:
-- Use `documents` as the normalized structured payload
-- Use `review_queue` for items that need manual follow-up
+在聊天回复中：
+- 优先用 `user_summary.headline` 开头
+- 如果 `review_queue` 不为空，要明确指出哪些票据需要人工复核，以及原因
+- 对普通发票，优先总结购买方、销售方、金额、项目名称
+- 对火车票，优先总结购票主体、路线、乘车日期、乘车人、座位信息
+
+当需要写入下游表格时：
+- 使用 `documents` 作为标准结构化数据来源
+- 使用 `review_queue` 标记需要人工跟进的记录
