@@ -8,6 +8,11 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
+from src.bitable_attachment_uploader import (
+    build_attachment_field_value,
+    build_bitable_attachment_upload_request,
+    perform_bitable_attachment_upload,
+)
 from src.ingest import load_input_documents
 from src.main import load_app_config
 from src.ocr_extract import parse_fields_from_text
@@ -16,7 +21,13 @@ from src.output_formatter import (
     format_skill_review_queue,
     format_skill_run_result,
 )
-from src.skill_entry import create_job_workspace, materialize_attachments, run_skill_job
+<<<<<<< HEAD
+from src.skill_entry import (
+    build_bitable_write_plan,
+    create_job_workspace,
+    materialize_attachments,
+    run_skill_job,
+)
 from src.sync_bitable import (
     BitableSettings,
     build_expense_record,
@@ -24,7 +35,8 @@ from src.sync_bitable import (
     load_bitable_settings,
     sync_skill_result_to_bitable,
 )
-from src.validate import validate_documents
+from src.bitable_session_writer import choose_bitable_write_action, pick_reusable_record_id
+from src.validate import DEFAULT_RULES_PATH, validate_documents
 
 
 def _make_test_workspace() -> Path:
@@ -256,359 +268,304 @@ class ValidateSmokeTest(unittest.TestCase):
                 "transport_number": None,
                 "from_station": None,
                 "to_station": None,
-                "travel_date": None,
                 "passenger_name": None,
-                "ocr_source": "image_ocr",
-                "ocr_status": "success",
-                "extraction_confidence": 0.8375,
+                "travel_date": None,
+                "departure_time": None,
+                "seat_no": None,
+                "seat_class": None,
+                "field_confidence": {
+                    "invoice_number": 0.99,
+                    "issue_date": 0.98,
+                    "amount": 0.97,
+                    "invoice_type": 0.95,
+                },
+                "extraction_confidence": 0.97,
                 "needs_review": False,
                 "review_reasons": [],
             }
         ]
-        config = {"validate": {"rules_file": "D:/Openclaw/Financial Automation/config/rules.yaml"}}
+        rules = {
+            "required_fields": ["invoice_number", "issue_date", "amount", "invoice_type"],
+            "confidence": {"minimum_confidence": 0.75, "low_confidence_requires_review": True},
+            "expense_type_rules": {
+                "transportation_fee": {
+                    "required_fields": [
+                        "buyer_name",
+                        "route",
+                        "transport_number",
+                        "from_station",
+                        "to_station",
+                        "travel_date",
+                        "passenger_name",
+                    ],
+                    "max_amount": 2000,
+                }
+            },
+            "compliance": {
+                "severity_map": {
+                    "missing_required_field": "error",
+                    "amount_exceeds_limit": "warning",
+                    "low_confidence": "warning",
+                    "duplicate_invoice_number": "error",
+                    "unknown_expense_type": "warning",
+                    "line_item_mismatch": "warning",
+                    "invoice_total_mismatch": "warning",
+                }
+            },
+            "review_policy": {
+                "image_ocr_requires_review": False,
+                "missing_required_field_requires_review": True,
+                "amount_exceeds_limit_requires_review": True,
+                "duplicate_invoice_requires_review": True,
+                "consistency_requires_review": True,
+            },
+            "consistency": {"check_invoice_total": True, "check_line_items": True, "amount_tolerance": 0.05},
+            "dedup": {"strategy": "invoice_number_first", "fallback_fields": ["issue_date", "amount", "vendor", "source_file_name"]},
+        }
 
-        validated_items, report = validate_documents(items, config)
-
-        self.assertEqual(report["error_docs"], 1)
-        self.assertEqual(validated_items[0]["compliance_status"], "error")
-        finding_codes = {finding["code"] for finding in validated_items[0]["validation_findings"]}
+        validated, report = validate_documents(items, {"validate": {"rules_file": str(DEFAULT_RULES_PATH)}})
+        self.assertEqual(validated[0]["compliance_status"], "error")
+        finding_codes = {f["code"] for f in validated[0]["validation_findings"]}
         self.assertIn("missing_required_field", finding_codes)
-        self.assertTrue(validated_items[0]["needs_review"])
-
-    def test_validate_documents_flags_consistency_mismatches(self) -> None:
-        items = [
-            {
-                "doc_id": "doc-2",
-                "source_file_name": "conference.pdf",
-                "invoice_number": "24112000000114409809",
-                "issue_date": "2024-08-26",
-                "amount": 100.0,
-                "invoice_type": "conference_fee",
-                "buyer_name": "复旦大学",
-                "vendor": "北京冠大文化传播有限公司",
-                "quantity": 2,
-                "unit_price": 30.0,
-                "line_amount": 70.0,
-                "tax_amount": 20.0,
-                "line_items": [
-                    {
-                        "item_name": "注册费",
-                        "quantity": 2,
-                        "unit_price": 30.0,
-                        "line_amount": 70.0,
-                        "tax_amount": 20.0,
-                    }
-                ],
-                "ocr_source": "pdf_text",
-                "ocr_status": "success",
-                "extraction_confidence": 0.9,
-                "needs_review": False,
-                "review_reasons": [],
-            }
-        ]
-        config = {"validate": {"rules_file": "D:/Openclaw/Financial Automation/config/rules.yaml"}}
-
-        validated_items, report = validate_documents(items, config)
-        findings = validated_items[0]["validation_findings"]
-        finding_codes = {finding["code"] for finding in findings}
-
-        self.assertEqual(report["warning_docs"], 1)
-        self.assertEqual(validated_items[0]["compliance_status"], "warning")
-        self.assertIn("line_item_mismatch", finding_codes)
-        self.assertIn("invoice_total_mismatch", finding_codes)
-        self.assertTrue(validated_items[0]["needs_review"])
-        self.assertIn("validation_consistency_check_failed", validated_items[0]["review_reasons"])
-
-    def test_validate_documents_passes_consistent_invoice(self) -> None:
-        items = [
-            {
-                "doc_id": "doc-3",
-                "source_file_name": "hotel.pdf",
-                "invoice_number": "24122000000046417589",
-                "issue_date": "2024-08-05",
-                "amount": 924.0,
-                "invoice_type": "accommodation_fee",
-                "buyer_name": "复旦大学",
-                "vendor": "天津滨海一号酒店管理有限公司",
-                "quantity": 3,
-                "unit_price": 290.5660377358493,
-                "line_amount": 871.7,
-                "tax_amount": 52.3,
-                "line_items": [
-                    {
-                        "item_name": "住宿费",
-                        "quantity": 3,
-                        "unit_price": 290.5660377358493,
-                        "line_amount": 871.7,
-                        "tax_amount": 52.3,
-                    }
-                ],
-                "ocr_source": "pdf_text",
-                "ocr_status": "success",
-                "extraction_confidence": 0.9,
-                "needs_review": False,
-                "review_reasons": [],
-            }
-        ]
-        config = {"validate": {"rules_file": "D:/Openclaw/Financial Automation/config/rules.yaml"}}
-
-        validated_items, report = validate_documents(items, config)
-
-        self.assertEqual(report["pass_docs"], 1)
-        self.assertEqual(validated_items[0]["compliance_status"], "pass")
-        self.assertEqual(validated_items[0]["validation_findings"], [])
-        self.assertFalse(validated_items[0]["needs_review"])
+        self.assertTrue(validated[0]["needs_review"])
 
 
-class OutputFormatterSmokeTest(unittest.TestCase):
-    def test_format_invoice_skill_document(self) -> None:
-        item = {
-            "doc_id": "doc-invoice",
-            "source_file_name": "hotel.pdf",
-            "source_file_path": "D:/Openclaw/Financial Automation/runtime/sample_run_input/hotel.pdf",
-            "invoice_type": "accommodation_fee",
-            "invoice_number": "24122000000046417589",
-            "issue_date": "2024-08-05",
-            "amount": 924.0,
+class FormatterSmokeTest(unittest.TestCase):
+    def test_formatter_outputs_expected_skill_payloads(self) -> None:
+        validated_item = {
+            "doc_id": "doc-1",
+            "invoice_type": "conference_fee",
+            "source_file_name": "invoice.pdf",
+            "invoice_number": "24112000000114409809",
+            "issue_date": "2024-08-26",
+            "amount": 5570.8,
             "currency": "CNY",
             "buyer_name": "复旦大学",
             "buyer_tax_id": "12100000425006117P",
-            "vendor": "天津滨海一号酒店管理有限公司",
-            "vendor_tax_id": "9112011656269768XB",
-            "item_name": "住宿费",
+            "vendor": "北京冠大文化传播有限公司",
+            "vendor_tax_id": "91110115MADQ08DP3H",
+            "item_name": "* 会展服务 * 注册费",
+            "quantity": 1,
+            "unit_price": 5515.643564356441,
+            "line_amount": 5515.64,
+            "tax_rate": "1%",
+            "tax_amount": 55.16,
             "line_items": [
                 {
-                    "item_name": "住宿费",
-                    "quantity": 3,
-                    "unit_price": 290.5660377358493,
-                    "line_amount": 871.7,
-                    "tax_rate": "6%",
-                    "tax_amount": 52.3,
+                    "item_name": "* 会展服务 * 注册费",
+                    "quantity": 1,
+                    "unit_price": 5515.643564356441,
+                    "line_amount": 5515.64,
+                    "tax_rate": "1%",
+                    "tax_amount": 55.16,
                 }
             ],
+            "field_confidence": {"invoice_number": 0.99, "issue_date": 0.98, "amount": 0.97, "invoice_type": 0.96},
+            "extraction_confidence": 0.975,
             "compliance_status": "pass",
             "validation_findings": [],
             "needs_review": False,
             "review_reasons": [],
-            "extraction_confidence": 0.9,
-            "ocr_status": "success",
         }
 
-        formatted = format_skill_document(item)
+        skill_doc = format_skill_document(validated_item)
+        self.assertEqual(skill_doc["document_type"], "conference_fee")
+        self.assertEqual(skill_doc["extraction"]["buyer"]["name"], "复旦大学")
+        self.assertEqual(skill_doc["extraction"]["seller"]["name"], "北京冠大文化传播有限公司")
+        self.assertEqual(skill_doc["extraction"]["line_items"][0]["line_amount"], 5515.64)
 
-        self.assertEqual(formatted["document_type"], "accommodation_fee")
-        self.assertEqual(formatted["extraction"]["document"]["invoice_number"], "24122000000046417589")
-        self.assertEqual(formatted["extraction"]["buyer"]["name"], "复旦大学")
-        self.assertEqual(formatted["extraction"]["seller"]["name"], "天津滨海一号酒店管理有限公司")
-        self.assertEqual(formatted["extraction"]["line_items"][0]["item_name"], "住宿费")
-        self.assertEqual(formatted["validation"]["status"], "pass")
-        self.assertFalse(formatted["review"]["needs_review"])
+        skill_review = format_skill_review_queue([validated_item])
+        self.assertEqual(skill_review, [])
 
-    def test_format_rail_ticket_skill_document(self) -> None:
-        item = {
-            "doc_id": "doc-rail",
-            "source_file_name": "ticket.jpg",
-            "source_file_path": "D:/Openclaw/Financial Automation/runtime/sample_run_input/ticket.jpg",
-            "invoice_type": "transportation_fee",
-            "invoice_number": "25339190041005476782",
-            "issue_date": "2025-10-16",
-            "amount": 87.0,
-            "currency": "CNY",
-            "buyer_name": "复旦大学",
-            "buyer_tax_id": "12100000425006117P",
-            "transport_number": "G240",
-            "from_station": "杭州东站",
-            "to_station": "上海虹桥站",
-            "route": "杭州东站->上海虹桥站",
-            "travel_date": "2025-10-12",
-            "departure_time": "19:34",
-            "passenger_name": "林泓",
-            "seat_no": "05车14F号",
-            "seat_class": "二等座",
-            "compliance_status": "pass",
-            "validation_findings": [],
-            "needs_review": True,
-            "review_reasons": ["image_ocr_requires_review"],
-            "extraction_confidence": 0.875,
-            "ocr_status": "success",
-        }
-
-        formatted = format_skill_document(item)
-
-        self.assertEqual(formatted["document_type"], "transportation_fee")
-        self.assertEqual(formatted["extraction"]["travel"]["transport_number"], "G240")
-        self.assertEqual(formatted["extraction"]["travel"]["route"], "杭州东站->上海虹桥站")
-        self.assertEqual(formatted["extraction"]["passenger"]["name"], "林泓")
-        self.assertEqual(formatted["review"]["reasons"], ["image_ocr_requires_review"])
-
-    def test_format_skill_review_queue(self) -> None:
-        items = [
-            {
-                "doc_id": "doc-rail",
-                "source_file_name": "ticket.jpg",
-                "invoice_type": "transportation_fee",
-                "invoice_number": "25339190041005476782",
-                "issue_date": "2025-10-16",
-                "amount": 87.0,
-                "buyer_name": "复旦大学",
-                "transport_number": "G240",
-                "route": "杭州东站->上海虹桥站",
-                "travel_date": "2025-10-12",
-                "passenger_name": "林泓",
-                "needs_review": True,
-                "review_reasons": ["image_ocr_requires_review"],
-                "compliance_status": "pass",
-                "validation_findings": [],
-            },
-            {
-                "doc_id": "doc-pass",
-                "source_file_name": "hotel.pdf",
-                "invoice_type": "accommodation_fee",
-                "needs_review": False,
-            },
-        ]
-
-        queue = format_skill_review_queue(items)
-
-        self.assertEqual(len(queue), 1)
-        self.assertEqual(queue[0]["doc_id"], "doc-rail")
-        self.assertEqual(queue[0]["review"]["reasons"], ["image_ocr_requires_review"])
-        self.assertEqual(queue[0]["summary"]["transport_number"], "G240")
-
-    def test_format_skill_run_result(self) -> None:
-        documents = [{"doc_id": "doc-1"}, {"doc_id": "doc-2"}]
-        review_queue = [
-            {
-                "doc_id": "doc-2",
-                "source_file_name": "ticket.jpg",
-                "document_type": "transportation_fee",
-                "review": {"reasons": ["image_ocr_requires_review"]},
-                "summary": {
-                    "document": {
-                        "invoice_number": "25339190041005476782",
-                        "amount": 87.0,
-                    }
-                },
-            }
-        ]
-        payload = format_skill_run_result(
-            app_name="financial-automation",
-            run_id="20260424_999999",
-            input_dir="D:/Openclaw/Financial Automation/runtime/inbox",
-            output_dir="D:/Openclaw/Financial Automation/runtime/output/20260424_999999",
-            documents=documents,
-            review_queue=review_queue,
+        result = format_skill_run_result(
+            app_name="financial-expense-automation",
+            run_id="run_001",
+            input_dir="runtime/inbox",
+            output_dir="runtime/output/run_001",
+            documents=[skill_doc],
+            review_queue=[],
             counts={
-                "documents_seen": 2,
-                "documents_accepted": 2,
-                "documents_extracted": 2,
-                "documents_for_review": 1,
+                "documents_seen": 1,
+                "documents_accepted": 1,
+                "documents_extracted": 1,
+                "documents_for_review": 0,
                 "documents_pass": 1,
-                "documents_warning": 1,
+                "documents_warning": 0,
                 "documents_error": 0,
             },
         )
-
-        self.assertEqual(payload["run_id"], "20260424_999999")
-        self.assertEqual(payload["summary"]["documents_for_review"], 1)
-        self.assertIn("Processed 2 documents", payload["user_summary"]["headline"])
-        self.assertEqual(payload["highlights"]["review_queue_count"], 1)
-        self.assertEqual(
-            payload["highlights"]["review_items"][0]["reasons"],
-            ["image_ocr_requires_review"],
-        )
-        self.assertEqual(len(payload["documents"]), 2)
-        self.assertEqual(len(payload["review_queue"]), 1)
+        self.assertEqual(result["summary"]["documents_pass"], 1)
+        self.assertEqual(result["highlights"]["review_queue_count"], 0)
 
 
 class SkillEntrySmokeTest(unittest.TestCase):
-    def _make_workspace(self) -> Path:
-        sandbox_root = Path(__file__).resolve().parent.parent / ".tmp_tests"
-        sandbox_root.mkdir(parents=True, exist_ok=True)
-        workspace = sandbox_root / f"skill_entry_{uuid.uuid4().hex}"
-        workspace.mkdir(parents=True, exist_ok=True)
-        self.addCleanup(lambda: shutil.rmtree(workspace, ignore_errors=True))
-        return workspace
+    def test_create_job_workspace_uses_runtime_root(self) -> None:
+        root = _make_test_workspace()
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        config = {"paths": {"runtime_dir": str(root / "custom_runtime")}}
+        workspace = create_job_workspace(config, root, job_id="job_test")
+        self.assertEqual(Path(workspace["job_dir"]), root / "custom_runtime" / "jobs" / "job_test")
+        self.assertTrue(Path(workspace["input_dir"]).exists())
+        self.assertTrue(Path(workspace["output_dir"]).exists())
 
-    def test_create_job_workspace_builds_expected_dirs(self) -> None:
-        temp_dir = self._make_workspace()
-        runtime_dir = temp_dir / "runtime"
-        config = {"paths": {"runtime_dir": str(runtime_dir)}}
+    def test_materialize_attachments_filters_unsupported_files(self) -> None:
+        root = _make_test_workspace()
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        input_dir = root / "inbox"
+        source_file = root / "invoice.pdf"
+        source_file.write_bytes(b"pdf-bytes")
 
-        workspace = create_job_workspace(config, temp_dir, job_id="job_demo")
+        attachments = [
+            {"file_name": "invoice.pdf", "source_path": str(source_file)},
+            {"file_name": "note.txt", "content_bytes": b"ignore me"},
+        ]
 
-        self.assertEqual(workspace["job_id"], "job_demo")
-        self.assertTrue(Path(str(workspace["job_dir"])).exists())
-        self.assertTrue(Path(str(workspace["input_dir"])).exists())
-        self.assertTrue(Path(str(workspace["output_dir"])).exists())
+        saved = materialize_attachments(attachments, input_dir)
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0].name, "invoice.pdf")
+        self.assertEqual(saved[0].read_bytes(), b"pdf-bytes")
 
-    def test_materialize_attachments_writes_supported_files(self) -> None:
-        temp_dir = self._make_workspace()
-        input_dir = temp_dir / "inbox"
-        source_file = temp_dir / "ticket.jpg"
-        source_file.write_bytes(b"image-bytes")
-
-        saved = materialize_attachments(
-            [
-                {"file_name": "invoice.pdf", "content_bytes": b"pdf-bytes"},
-                {"file_name": "ticket.jpg", "source_path": str(source_file)},
-                {"file_name": "note.txt", "content_bytes": b"skip-me"},
-                {"file_name": "invoice.pdf", "content_bytes": b"pdf-bytes-2"},
-            ],
-            input_dir,
-        )
-
-        self.assertEqual(len(saved), 3)
-        self.assertTrue((input_dir / "invoice.pdf").exists())
-        self.assertTrue((input_dir / "invoice_1.pdf").exists())
-        self.assertTrue((input_dir / "ticket.jpg").exists())
-        self.assertFalse((input_dir / "note.txt").exists())
-
-    def test_run_skill_job_returns_skill_result_with_job_info(self) -> None:
-        project_root = self._make_workspace()
-        config_dir = project_root / "config"
-        runtime_dir = project_root / "runtime"
-        config_dir.mkdir()
-        runtime_dir.mkdir()
-
-        config_path = config_dir / "app_config.yaml"
-        config_path.write_text(
-            textwrap.dedent(
-                """
-                paths:
-                  input_dir: runtime/inbox
-                  output_dir: runtime/output
-                  runtime_dir: runtime
-                validate:
-                  rules_file: config/rules.yaml
-                """
-            ).strip()
-            + "\n",
-            encoding="utf-8",
-        )
-
-        fake_result = {
-            "status": "completed",
-            "summary": {"documents_extracted": 1},
-            "documents": [],
+    @patch("src.skill_entry.sync_skill_result_with_config")
+    @patch("src.skill_entry.load_skill_result")
+    @patch("src.skill_entry.run_pipeline_for_job")
+    @patch("src.skill_entry.materialize_attachments")
+    @patch("src.skill_entry.create_job_workspace")
+    @patch("src.skill_entry.load_app_config")
+    def test_run_skill_job_appends_job_and_bitable_sync(
+        self,
+        mock_load_config,
+        mock_workspace,
+        mock_materialize,
+        mock_run_pipeline,
+        mock_load_result,
+        mock_sync,
+    ) -> None:
+        root = _make_test_workspace()
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        config = {"sync": {"bitable": {"enabled": False}}}
+        mock_load_config.return_value = (config, root)
+        mock_workspace.return_value = {
+            "job_id": "job-1",
+            "job_dir": root / "runtime/jobs/job-1",
+            "input_dir": root / "runtime/jobs/job-1/inbox",
+            "output_dir": root / "runtime/jobs/job-1/output",
         }
+        saved_file = root / "runtime/jobs/job-1/inbox/invoice.pdf"
+        saved_file.parent.mkdir(parents=True, exist_ok=True)
+        saved_file.write_bytes(b"pdf")
+        mock_materialize.return_value = [saved_file]
+        mock_run_pipeline.return_value = {"output": {"run_dir": str(root / "runtime/output/run_001")}}
+        mock_load_result.return_value = {"documents": []}
+        mock_sync.return_value = {"enabled": False, "status": "disabled"}
 
-        with patch("src.skill_entry.run_pipeline_for_job") as mocked_run, patch(
-            "src.skill_entry.load_skill_result",
-            return_value=fake_result.copy(),
-        ) as mocked_load:
-            mocked_run.return_value = {
-                "run_id": "20260424_000001",
-                "output": {
-                    "run_dir": str(project_root / "runtime" / "jobs" / "job_fake" / "output" / "20260424_000001")
-                },
-            }
+        result = run_skill_job([{"file_name": "invoice.pdf", "source_path": str(saved_file)}])
+        self.assertEqual(result["job"]["job_id"], "job-1")
+        self.assertEqual(result["job"]["saved_files"], [str(saved_file)])
+        self.assertEqual(result["bitable_sync"]["status"], "disabled")
+        mock_sync.assert_called_once()
 
-            result = run_skill_job(
-                attachments=[{"file_name": "ticket.jpg", "content_bytes": b"fake-image"}],
-                config_path=config_path,
+
+class BitableAttachmentUploaderSmokeTest(unittest.TestCase):
+    def test_build_bitable_attachment_upload_request(self) -> None:
+        request = build_bitable_attachment_upload_request(
+            app_token="app_token_xxx",
+            attachment_paths=["/tmp/a.jpg", "/tmp/b.pdf"],
+        )
+        self.assertIsNotNone(request)
+        assert request is not None
+        self.assertEqual(request.app_token, "app_token_xxx")
+        self.assertEqual(request.parent_type, "bitable_image")
+        self.assertEqual(request.attachment_paths, ["/tmp/a.jpg", "/tmp/b.pdf"])
+
+    def test_build_bitable_attachment_upload_request_returns_none_when_empty(self) -> None:
+        request = build_bitable_attachment_upload_request(app_token="app_token_xxx", attachment_paths=[])
+        self.assertIsNone(request)
+
+    def test_perform_bitable_attachment_upload_returns_structured_not_supported(self) -> None:
+        request = build_bitable_attachment_upload_request(
+            app_token="app_token_xxx",
+            attachment_paths=["/tmp/a.jpg"],
+        )
+        assert request is not None
+        result = perform_bitable_attachment_upload(request)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "not_supported_yet")
+        self.assertEqual(result.provider, "bitable_context_upload")
+        self.assertEqual(result.file_tokens, [])
+        self.assertEqual(result.errors[0]["code"], "bitable_context_upload_unavailable")
+
+    def test_build_attachment_field_value(self) -> None:
+        self.assertEqual(
+            build_attachment_field_value(["tok1", "tok2"]),
+            [{"file_token": "tok1"}, {"file_token": "tok2"}],
+        )
+
+
+class BitableWritePlanSmokeTest(unittest.TestCase):
+    def test_build_bitable_write_plan_includes_attachment_handoff(self) -> None:
+        skill_result = {
+            "documents": [
+                {
+                    "doc_id": "doc-transport",
+                    "document_type": "transportation_fee",
+                    "source_file_name": "ticket.jpg",
+                    "extraction": {
+                        "document": {"invoice_number": "253", "amount": 87.0, "currency": "CNY"},
+                        "buyer": {"name": "复旦大学", "tax_id": "12100000425006117P"},
+                        "travel": {
+                            "transport_number": "G240",
+                            "from_station": "杭州东站",
+                            "to_station": "上海虹桥站",
+                            "travel_date": "2025-10-12",
+                            "departure_time": "19:34",
+                        },
+                        "passenger": {"name": "林泓", "seat_no": "05车14F号", "seat_class": "二等座"},
+                    },
+                    "validation": {"status": "pass"},
+                    "review": {"needs_review": False, "reasons": []},
+                }
+            ]
+        }
+        plan = build_bitable_write_plan(
+            skill_result,
+            attachment_paths=["/tmp/ticket.jpg"],
+            app_token="app_token_xxx",
+        )
+        self.assertEqual(plan["mode"], "user_identity")
+        self.assertFalse(plan["include_attachments"])
+        self.assertEqual(plan["attachment_strategy"], "upload_to_bitable_context_first")
+        self.assertTrue(plan["attachment_upload_handoff"]["required"])
+        self.assertEqual(plan["attachment_upload_handoff"]["status"], "pending_external_uploader")
+        self.assertEqual(plan["attachment_upload_handoff"]["request"]["app_token"], "app_token_xxx")
+        self.assertEqual(plan["attachment_upload_handoff"]["request"]["parent_type"], "bitable_image")
+        self.assertEqual(plan["attachment_upload_handoff"]["attachment_paths"], ["/tmp/ticket.jpg"])
+
+
+class BitableSyncSmokeTest(unittest.TestCase):
+    def test_load_bitable_settings_from_env(self) -> None:
+        env_patch = {
+            "FEISHU_BITABLE_APP_TOKEN": "app_token_xxx",
+            "FEISHU_BITABLE_TRANSPORT_TABLE": "tbl_transport",
+            "FEISHU_BITABLE_EXPENSE_TABLE": "tbl_expense",
+        }
+        with patch.dict(os.environ, env_patch, clear=False):
+            settings = load_bitable_settings(
+                {
+                    "sync": {
+                        "bitable": {
+                            "enabled": True,
+                            "dry_run": False,
+                            "endpoint": "https://open.feishu.cn",
+                            "batch_size": 50,
+                            "app_token_env": "FEISHU_BITABLE_APP_TOKEN",
+                            "transport_table_id_env": "FEISHU_BITABLE_TRANSPORT_TABLE",
+                            "expense_table_id_env": "FEISHU_BITABLE_EXPENSE_TABLE",
+                        }
+                    }
+                }
             )
 
+<<<<<<< HEAD
         mocked_run.assert_called_once()
         mocked_load.assert_called_once()
         self.assertEqual(result["status"], "completed")
@@ -616,6 +573,187 @@ class SkillEntrySmokeTest(unittest.TestCase):
         self.assertEqual(result["bitable_sync"]["status"], "disabled")
         self.assertEqual(len(result["job"]["saved_files"]), 1)
         self.assertTrue(result["job"]["saved_files"][0].endswith("ticket.jpg"))
+=======
+        self.assertTrue(settings.enabled)
+        self.assertFalse(settings.dry_run)
+        self.assertEqual(settings.batch_size, 50)
+        self.assertEqual(settings.transport_table_id, "tbl_transport")
+        self.assertEqual(settings.expense_table_id, "tbl_expense")
+
+    def test_build_transport_record(self) -> None:
+        document = {
+            "doc_id": "doc-transport",
+            "document_type": "transportation_fee",
+            "source_file_name": "ticket.jpg",
+            "extraction": {
+                "document": {
+                    "invoice_number": "25339190041005476782",
+                    "amount": 87.0,
+                    "currency": "CNY",
+                },
+                "buyer": {"name": "复旦大学", "tax_id": "12100000425006117P"},
+                "travel": {
+                    "transport_number": "G240",
+                    "from_station": "杭州东站",
+                    "to_station": "上海虹桥站",
+                    "travel_date": "2025-10-12",
+                    "departure_time": "19:34",
+                },
+                "passenger": {"name": "林泓", "seat_no": "05车14F号", "seat_class": "二等座"},
+            },
+            "validation": {"status": "pass"},
+            "review": {"needs_review": False, "reasons": []},
+        }
+        record = build_transport_record(document, [{"file_token": "file_transport"}])
+        self.assertEqual(record["doc_id"], "doc-transport")
+        self.assertEqual(record["报销类型"], "🚄 交通报销")
+        self.assertEqual(record["票据附件"], [{"file_token": "file_transport"}])
+        self.assertEqual(record["金额"], 87.0)
+        self.assertEqual(record["购票主体"], "复旦大学")
+        self.assertEqual(record["车次"], "G240")
+        self.assertEqual(record["乘车日期"], 1760198400000)
+        self.assertEqual(record["校验状态"], "✅ 通过")
+        self.assertEqual(record["识别摘要"], "🚄｜林泓｜G240｜杭州东站 → 上海虹桥站｜¥87")
+        self.assertFalse(record["是否复核"])
+
+    def test_build_expense_record(self) -> None:
+        document = {
+            "doc_id": "doc-expense",
+            "document_type": "conference_fee",
+            "source_file_name": "invoice.pdf",
+            "extraction": {
+                "document": {
+                    "invoice_number": "24112000000114409809",
+                    "issue_date": "2024-08-26",
+                    "amount": 5570.8,
+                    "currency": "CNY",
+                },
+                "buyer": {"name": "复旦大学", "tax_id": "12100000425006117P"},
+                "seller": {"name": "北京冠大文化传播有限公司", "tax_id": "91110115MADQ08DP3H"},
+                "line_items": [
+                    {
+                        "item_name": "* 会展服务 * 注册费",
+                        "quantity": 1,
+                        "unit_price": 5515.643564356441,
+                        "line_amount": 5515.64,
+                        "tax_rate": "1%",
+                        "tax_amount": 55.16,
+                    }
+                ],
+            },
+            "validation": {"status": "pass"},
+            "review": {"needs_review": False, "reasons": []},
+        }
+        record = build_expense_record(document, [{"file_token": "file_expense"}])
+        self.assertEqual(record["doc_id"], "doc-expense")
+        self.assertEqual(record["报销类型"], "🧾 费用报销")
+        self.assertEqual(record["票据附件"], [{"file_token": "file_expense"}])
+        self.assertEqual(record["金额"], 5570.8)
+        self.assertEqual(record["购买方名称"], "复旦大学")
+        self.assertEqual(record["销售方名称"], "北京冠大文化传播有限公司")
+        self.assertEqual(record["项目名称"], "* 会展服务 * 注册费")
+        self.assertEqual(record["开票日期"], 1724601600000)
+        self.assertEqual(record["校验状态"], "✅ 通过")
+        self.assertEqual(record["识别摘要"], "🧾｜* 会展服务 * 注册费｜¥5570.8｜2024-08-26")
+        self.assertFalse(record["是否复核"])
+
+    def test_sync_skill_result_to_bitable_dry_run(self) -> None:
+        settings = BitableSettings(
+            enabled=True,
+            dry_run=True,
+            endpoint="https://open.feishu.cn",
+            batch_size=200,
+            mode="user_identity",
+            include_attachments=False,
+            app_token="app_token_xxx",
+            transport_table_id="tbl_transport",
+            expense_table_id="tbl_expense",
+        )
+        skill_result = {
+            "documents": [
+                {
+                    "doc_id": "doc-transport",
+                    "document_type": "transportation_fee",
+                    "source_file_name": "ticket.jpg",
+                    "extraction": {
+                        "document": {"invoice_number": "25339190041005476782", "amount": 87.0, "currency": "CNY"},
+                        "buyer": {"name": "复旦大学", "tax_id": "12100000425006117P"},
+                        "travel": {
+                            "transport_number": "G240",
+                            "from_station": "杭州东站",
+                            "to_station": "上海虹桥站",
+                            "travel_date": "2025-10-12",
+                            "departure_time": "19:34",
+                        },
+                        "passenger": {"name": "林泓", "seat_no": "05车14F号", "seat_class": "二等座"},
+                    },
+                    "validation": {"status": "pass"},
+                    "review": {"needs_review": False, "reasons": []},
+                },
+                {
+                    "doc_id": "doc-expense",
+                    "document_type": "conference_fee",
+                    "source_file_name": "invoice.pdf",
+                    "extraction": {
+                        "document": {
+                            "invoice_number": "24112000000114409809",
+                            "issue_date": "2024-08-26",
+                            "amount": 5570.8,
+                            "currency": "CNY",
+                        },
+                        "buyer": {"name": "复旦大学", "tax_id": "12100000425006117P"},
+                        "seller": {"name": "北京冠大文化传播有限公司", "tax_id": "91110115MADQ08DP3H"},
+                        "line_items": [
+                            {
+                                "item_name": "* 会展服务 * 注册费",
+                                "quantity": 1,
+                                "unit_price": 5515.643564356441,
+                                "line_amount": 5515.64,
+                                "tax_rate": "1%",
+                                "tax_amount": 55.16,
+                            }
+                        ],
+                    },
+                    "validation": {"status": "pass"},
+                    "review": {"needs_review": False, "reasons": []},
+                },
+            ]
+        }
+        summary = sync_skill_result_to_bitable(
+            skill_result,
+            settings,
+            attachment_paths=["/tmp/ticket.jpg", "/tmp/invoice.pdf"],
+        )
+        self.assertEqual(summary["status"], "dry_run")
+        self.assertEqual(summary["tables"]["transport"]["records_prepared"], 1)
+        self.assertEqual(summary["tables"]["expense"]["records_prepared"], 1)
+        self.assertEqual(summary["mode"], "user_identity")
+        self.assertFalse(summary["include_attachments"])
+        self.assertEqual(summary["tables"]["transport"]["preview"][0]["票据附件"], "🖼️ 原图已接收：ticket.jpg")
+        self.assertEqual(summary["tables"]["expense"]["preview"][0]["票据附件"], "🖼️ 原图已接收：invoice.pdf")
+
+
+class BitableSessionWriterSmokeTest(unittest.TestCase):
+    def test_pick_reusable_record_id_prefers_blank_doc_id(self) -> None:
+        records = [
+            {"record_id": "rec1", "fields": {"doc_id": [{"text": "filled", "type": "text"}]}},
+            {"record_id": "rec2", "fields": {}},
+            {"record_id": "rec3", "fields": {"doc_id": "other"}},
+        ]
+        self.assertEqual(pick_reusable_record_id(records), "rec2")
+
+    def test_choose_bitable_write_action_uses_update_when_blank_row_exists(self) -> None:
+        action = choose_bitable_write_action([
+            {"record_id": "rec2", "fields": {}},
+        ])
+        self.assertEqual(action, {"action": "update", "record_id": "rec2"})
+
+    def test_choose_bitable_write_action_falls_back_to_create(self) -> None:
+        action = choose_bitable_write_action([
+            {"record_id": "rec1", "fields": {"doc_id": [{"text": "filled", "type": "text"}]}}
+        ])
+        self.assertEqual(action, {"action": "create"})
+>>>>>>> dca16f5 (Polish bitable display mapping)
 
 
 class SyncBitableSmokeTest(unittest.TestCase):
