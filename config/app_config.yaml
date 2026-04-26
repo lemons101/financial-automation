@@ -41,10 +41,12 @@ validate:
 
 sync:
   bitable:
-    enabled: false
-    dry_run: true
+    enabled: true
+    dry_run: false
     endpoint: https://open.feishu.cn
     batch_size: 200
+    include_attachments: true
+    user_token_file: runtime/oauth/feishu_user_token.json
     # Keep credentials/IDs in env vars.
     app_id_env: FEISHU_APP_ID
     app_secret_env: FEISHU_APP_SECRET

@@ -17,6 +17,7 @@ Thumbs.db
 runtime/output/
 runtime/jobs/
 runtime/models/
+runtime/oauth/
 .tmp_tests/
 Automation/.tmp_test/
 

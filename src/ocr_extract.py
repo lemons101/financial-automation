@@ -243,7 +243,11 @@ def _extract_single_document(
     keep_raw_text: bool,
 ) -> dict[str, Any]:
     source_path = str(document.get("file_path", "")).strip()
-    ext = str(document.get("ext", "")).lower()
+    ext = str(document.get("ext", "")).lower().strip()
+    if not ext:
+        candidate_name = source_path or str(document.get("file_name", "")).strip()
+        if candidate_name:
+            ext = Path(candidate_name).suffix.lower()
 
     payload: OCRPayload
     if ocr_init_error:

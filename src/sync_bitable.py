@@ -44,8 +44,6 @@ TRANSPORT_FIELD_NAMES = {
     "validation_status": "校验状态",
     "needs_review": "是否复核",
     "review_reasons": "复核原因",
-    "summary": "识别摘要",
-    "raw_json": "原始JSON",
 }
 
 EXPENSE_FIELD_NAMES = {
@@ -67,12 +65,9 @@ EXPENSE_FIELD_NAMES = {
     "line_amount": "项目金额",
     "tax_rate": "税率",
     "tax_amount": "税额",
-    "line_items_json": "项目明细JSON",
     "validation_status": "校验状态",
     "needs_review": "是否复核",
     "review_reasons": "复核原因",
-    "summary": "识别摘要",
-    "raw_json": "原始JSON",
 }
 
 
@@ -288,11 +283,13 @@ def upload_attachment(
         raise BitableSyncError(f"Attachment file does not exist: {path}")
 
     mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    ext = path.suffix.lower()
+    parent_type = "bitable_image" if ext in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"} else "bitable_file"
     response = _post_multipart(
         f"{settings.endpoint}/open-apis/drive/v1/medias/upload_all",
         fields={
             "file_name": path.name,
-            "parent_type": "bitable_file",
+            "parent_type": parent_type,
             "parent_node": settings.app_token,
             "size": str(path.stat().st_size),
         },
@@ -345,8 +342,6 @@ def build_transport_record(document: dict[str, Any], attachment_payload: list[di
         TRANSPORT_FIELD_NAMES["validation_status"]: _map_validation_status(validation.get("status")),
         TRANSPORT_FIELD_NAMES["needs_review"]: bool(review.get("needs_review")),
         TRANSPORT_FIELD_NAMES["review_reasons"]: _format_review_reasons(review.get("reasons")),
-        TRANSPORT_FIELD_NAMES["summary"]: _build_transport_summary(document),
-        TRANSPORT_FIELD_NAMES["raw_json"]: json.dumps(document, ensure_ascii=False),
     }
     return _drop_none(fields)
 
@@ -381,12 +376,9 @@ def build_expense_record(document: dict[str, Any], attachment_payload: list[dict
         EXPENSE_FIELD_NAMES["line_amount"]: first_item.get("line_amount"),
         EXPENSE_FIELD_NAMES["tax_rate"]: first_item.get("tax_rate"),
         EXPENSE_FIELD_NAMES["tax_amount"]: first_item.get("tax_amount"),
-        EXPENSE_FIELD_NAMES["line_items_json"]: json.dumps(line_items, ensure_ascii=False),
         EXPENSE_FIELD_NAMES["validation_status"]: _map_validation_status(validation.get("status")),
         EXPENSE_FIELD_NAMES["needs_review"]: bool(review.get("needs_review")),
         EXPENSE_FIELD_NAMES["review_reasons"]: _format_review_reasons(review.get("reasons")),
-        EXPENSE_FIELD_NAMES["summary"]: _build_expense_summary(document),
-        EXPENSE_FIELD_NAMES["raw_json"]: json.dumps(document, ensure_ascii=False),
     }
     return _drop_none(fields)
 

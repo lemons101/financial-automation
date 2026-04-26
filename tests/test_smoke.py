@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src.bitable_attachment_uploader import (
+    BitableAttachmentUploadError,
     build_attachment_field_value,
     build_bitable_attachment_upload_request,
     perform_bitable_attachment_upload,
@@ -21,7 +22,6 @@ from src.output_formatter import (
     format_skill_review_queue,
     format_skill_run_result,
 )
-<<<<<<< HEAD
 from src.skill_entry import (
     build_bitable_write_plan,
     create_job_workspace,
@@ -474,25 +474,21 @@ class BitableAttachmentUploaderSmokeTest(unittest.TestCase):
         self.assertIsNotNone(request)
         assert request is not None
         self.assertEqual(request.app_token, "app_token_xxx")
-        self.assertEqual(request.parent_type, "bitable_image")
+        self.assertEqual(request.provider, "bitable_context_upload_user_identity")
         self.assertEqual(request.attachment_paths, ["/tmp/a.jpg", "/tmp/b.pdf"])
 
     def test_build_bitable_attachment_upload_request_returns_none_when_empty(self) -> None:
         request = build_bitable_attachment_upload_request(app_token="app_token_xxx", attachment_paths=[])
         self.assertIsNone(request)
 
-    def test_perform_bitable_attachment_upload_returns_structured_not_supported(self) -> None:
+    def test_perform_bitable_attachment_upload_requires_user_token(self) -> None:
         request = build_bitable_attachment_upload_request(
             app_token="app_token_xxx",
             attachment_paths=["/tmp/a.jpg"],
         )
         assert request is not None
-        result = perform_bitable_attachment_upload(request)
-        self.assertFalse(result.ok)
-        self.assertEqual(result.status, "not_supported_yet")
-        self.assertEqual(result.provider, "bitable_context_upload")
-        self.assertEqual(result.file_tokens, [])
-        self.assertEqual(result.errors[0]["code"], "bitable_context_upload_unavailable")
+        with self.assertRaises(BitableAttachmentUploadError):
+            perform_bitable_attachment_upload(request)
 
     def test_build_attachment_field_value(self) -> None:
         self.assertEqual(
@@ -502,6 +498,50 @@ class BitableAttachmentUploaderSmokeTest(unittest.TestCase):
 
 
 class BitableWritePlanSmokeTest(unittest.TestCase):
+    @patch("src.skill_entry.perform_bitable_attachment_upload")
+    @patch("src.skill_entry.load_user_access_token")
+    def test_build_bitable_write_plan_includes_uploaded_attachment_tokens(self, mocked_load_token, mocked_upload) -> None:
+        mocked_load_token.return_value = "u-token"
+        class UploadResult:
+            def __init__(self) -> None:
+                self.ok = True
+                self.status = "completed"
+                self.provider = "bitable_context_upload_user_identity"
+                self.file_tokens = ["file_tok_1"]
+                self.uploaded = [{"file_token": "file_tok_1"}]
+                self.errors = []
+                self.message = "ok"
+        mocked_upload.return_value = UploadResult()
+        skill_result = {
+            "documents": [
+                {
+                    "doc_id": "doc-expense",
+                    "document_type": "conference_fee",
+                    "source_file_name": "invoice.jpg",
+                    "extraction": {
+                        "document": {"invoice_number": "123", "issue_date": "2024-08-26", "amount": 100.0, "currency": "CNY"},
+                        "buyer": {"name": "复旦大学", "tax_id": "12100000425006117P"},
+                        "seller": {"name": "供应商", "tax_id": "taxid"},
+                        "line_items": [{"item_name": "测试项目", "quantity": 1, "unit_price": 100.0, "line_amount": 100.0, "tax_rate": "0%", "tax_amount": 0.0}],
+                    },
+                    "validation": {"status": "pass"},
+                    "review": {"needs_review": False, "reasons": []},
+                }
+            ]
+        }
+        plan = build_bitable_write_plan(
+            skill_result,
+            attachment_paths=["/tmp/invoice.jpg"],
+            app_token="app_token_xxx",
+            config={"sync": {"bitable": {"endpoint": "https://open.feishu.cn"}}},
+        )
+        upload_result = plan["attachment_upload_result"]
+        if hasattr(upload_result, "get"):
+            self.assertEqual(upload_result["file_tokens"], ["file_tok_1"])
+        else:
+            self.fail("attachment_upload_result should be materialized as a dict")
+        self.assertEqual(plan["records"][0]["fields"]["票据附件"], [{"file_token": "file_tok_1"}])
+
     def test_build_bitable_write_plan_includes_attachment_handoff(self) -> None:
         skill_result = {
             "documents": [
@@ -544,9 +584,9 @@ class BitableWritePlanSmokeTest(unittest.TestCase):
         self.assertEqual(plan["write_policy"]["preferred"], "update_first_blank_row_then_create")
         self.assertEqual(plan["attachment_strategy"], "upload_to_bitable_context_first")
         self.assertTrue(plan["attachment_upload_handoff"]["required"])
-        self.assertEqual(plan["attachment_upload_handoff"]["status"], "pending_external_uploader")
+        self.assertEqual(plan["attachment_upload_handoff"]["status"], "ready_with_user_identity")
         self.assertEqual(plan["attachment_upload_handoff"]["request"]["app_token"], "app_token_xxx")
-        self.assertEqual(plan["attachment_upload_handoff"]["request"]["parent_type"], "bitable_image")
+        self.assertTrue(plan["attachment_upload_handoff"]["request"]["has_access_token"])
         self.assertEqual(plan["attachment_upload_handoff"]["attachment_paths"], ["/tmp/ticket.jpg"])
         self.assertEqual(plan["records"][0]["table_id"], "tbl_transport")
         self.assertEqual(plan["records"][0]["write_action"], {"action": "create"})
@@ -576,15 +616,6 @@ class BitableSyncSmokeTest(unittest.TestCase):
                 }
             )
 
-<<<<<<< HEAD
-        mocked_run.assert_called_once()
-        mocked_load.assert_called_once()
-        self.assertEqual(result["status"], "completed")
-        self.assertIn("job", result)
-        self.assertEqual(result["bitable_sync"]["status"], "disabled")
-        self.assertEqual(len(result["job"]["saved_files"]), 1)
-        self.assertTrue(result["job"]["saved_files"][0].endswith("ticket.jpg"))
-=======
         self.assertTrue(settings.enabled)
         self.assertFalse(settings.dry_run)
         self.assertEqual(settings.batch_size, 50)
@@ -624,7 +655,6 @@ class BitableSyncSmokeTest(unittest.TestCase):
         self.assertEqual(record["车次"], "G240")
         self.assertEqual(record["乘车日期"], 1760198400000)
         self.assertEqual(record["校验状态"], "✅ 通过")
-        self.assertEqual(record["识别摘要"], "🚄｜林泓｜G240｜杭州东站 → 上海虹桥站｜¥87")
         self.assertFalse(record["是否复核"])
 
     def test_build_expense_record(self) -> None:
@@ -665,7 +695,6 @@ class BitableSyncSmokeTest(unittest.TestCase):
         self.assertEqual(record["项目名称"], "* 会展服务 * 注册费")
         self.assertEqual(record["开票日期"], 1724601600000)
         self.assertEqual(record["校验状态"], "✅ 通过")
-        self.assertEqual(record["识别摘要"], "🧾｜* 会展服务 * 注册费｜¥5570.8｜2024-08-26")
         self.assertFalse(record["是否复核"])
 
     def test_sync_skill_result_to_bitable_dry_run(self) -> None:
@@ -676,6 +705,8 @@ class BitableSyncSmokeTest(unittest.TestCase):
             batch_size=200,
             mode="user_identity",
             include_attachments=False,
+            app_id="",
+            app_secret="",
             app_token="app_token_xxx",
             transport_table_id="tbl_transport",
             expense_table_id="tbl_expense",
@@ -764,7 +795,6 @@ class BitableSessionWriterSmokeTest(unittest.TestCase):
             {"record_id": "rec1", "fields": {"doc_id": [{"text": "filled", "type": "text"}]}}
         ])
         self.assertEqual(action, {"action": "create"})
->>>>>>> dca16f5 (Polish bitable display mapping)
 
 
 class SyncBitableSmokeTest(unittest.TestCase):
@@ -837,10 +867,9 @@ class SyncBitableSmokeTest(unittest.TestCase):
             "review": {"needs_review": True, "reasons": ["image_ocr_requires_review"]},
         }
 
-        record = build_transport_record(document, [{"file_token": "file-token"}])
-        fields = record["fields"]
+        fields = build_transport_record(document, [{"file_token": "file-token"}])
 
-        self.assertEqual(fields["报销类型"], "交通报销")
+        self.assertEqual(fields["报销类型"], "🚄 交通报销")
         self.assertEqual(fields["票据号码"], "25339190041005476782")
         self.assertEqual(fields["购票主体"], "Fudan")
         self.assertEqual(fields["车次"], "G240")
@@ -884,13 +913,12 @@ class SyncBitableSmokeTest(unittest.TestCase):
             "review": {"needs_review": False, "reasons": []},
         }
 
-        record = build_expense_record(document, [{"file_token": "file-token"}])
-        fields = record["fields"]
+        fields = build_expense_record(document, [{"file_token": "file-token"}])
 
-        self.assertEqual(fields["报销类型"], "会议报销")
+        self.assertEqual(fields["报销类型"], "🧾 费用报销")
         self.assertEqual(fields["项目名称"], "会议费")
         self.assertEqual(fields["税率"], "1%")
-        self.assertIn("服务费", fields["项目明细JSON"])
+        self.assertNotIn("项目明细JSON", fields)
 
     def test_sync_skill_result_to_bitable_supports_dry_run(self) -> None:
         settings = BitableSettings(
@@ -898,6 +926,8 @@ class SyncBitableSmokeTest(unittest.TestCase):
             dry_run=True,
             endpoint="https://open.feishu.cn",
             batch_size=200,
+            mode="user_identity",
+            include_attachments=False,
             app_id="app_id",
             app_secret="app_secret",
             app_token="app_token",
@@ -945,7 +975,7 @@ class SyncBitableSmokeTest(unittest.TestCase):
         self.assertEqual(summary["status"], "dry_run")
         self.assertEqual(summary["tables"]["transport"]["records_prepared"], 1)
         self.assertEqual(summary["tables"]["expense"]["records_prepared"], 1)
-        self.assertEqual(summary["tables"]["transport"]["preview"][0]["fields"]["报销类型"], "交通报销")
+        self.assertEqual(summary["tables"]["transport"]["preview"][0]["报销类型"], "🚄 交通报销")
 
 
 if __name__ == "__main__":

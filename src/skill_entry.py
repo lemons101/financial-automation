@@ -6,12 +6,22 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .bitable_attachment_uploader import build_bitable_attachment_upload_request
+    from .bitable_attachment_uploader import (
+        build_attachment_field_value,
+        build_bitable_attachment_upload_request,
+        load_user_access_token,
+        perform_bitable_attachment_upload,
+    )
     from .bitable_session_writer import choose_bitable_write_action
     from .main import DEFAULT_CONFIG_PATH, load_app_config, run_pipeline
     from .sync_bitable import sync_skill_result_with_config
 except ImportError:  # pragma: no cover - supports running as a script.
-    from bitable_attachment_uploader import build_bitable_attachment_upload_request
+    from bitable_attachment_uploader import (
+        build_attachment_field_value,
+        build_bitable_attachment_upload_request,
+        load_user_access_token,
+        perform_bitable_attachment_upload,
+    )
     from bitable_session_writer import choose_bitable_write_action
     from main import DEFAULT_CONFIG_PATH, load_app_config, run_pipeline
     from sync_bitable import sync_skill_result_with_config
@@ -171,11 +181,36 @@ def build_bitable_write_plan(
         )
 
     documents = skill_result.get("documents", [])
+    bitable_config = (config or {}).get("sync", {}).get("bitable", {}) if isinstance(config, dict) else {}
+    token_file = bitable_config.get("user_token_file") or "runtime/oauth/feishu_user_token.json"
+    access_token = None
+    try:
+        if app_token and attachment_paths:
+            access_token = load_user_access_token(token_file)
+    except Exception:
+        access_token = None
     attachment_request = build_bitable_attachment_upload_request(
         app_token=app_token or "",
         attachment_paths=attachment_paths,
+        access_token=access_token,
+        endpoint=str(bitable_config.get("endpoint") or "https://open.feishu.cn"),
     )
-    bitable_config = (config or {}).get("sync", {}).get("bitable", {}) if isinstance(config, dict) else {}
+    attachment_upload_result = None
+    attachment_field_value: list[dict[str, str]] = []
+    if attachment_request and access_token:
+        try:
+            attachment_upload_result = perform_bitable_attachment_upload(attachment_request)
+            attachment_field_value = build_attachment_field_value(attachment_upload_result.file_tokens)
+        except Exception as exc:
+            attachment_upload_result = {
+                "ok": False,
+                "status": "failed",
+                "provider": attachment_request.provider,
+                "file_tokens": [],
+                "uploaded": [],
+                "errors": [{"code": "attachment_upload_failed", "message": str(exc)}],
+                "message": str(exc),
+            }
     transport_table_id = _extract_bitable_table_id(bitable_config, "transport_table_id")
     expense_table_id = _extract_bitable_table_id(bitable_config, "expense_table_id")
 
@@ -189,12 +224,17 @@ def build_bitable_write_plan(
         "attachment_strategy": "upload_to_bitable_context_first",
         "attachment_upload_handoff": {
             "required": bool(attachment_request),
-            "supported_by_current_project": False,
-            "status": "pending_external_uploader" if attachment_request else "not_needed",
-            "reason": "Bitable attachment fields reject generic Drive uploads; files must be uploaded into the current bitable context before writing file_token.",
-            "recommended_tool": "feishu_drive_media",
+            "supported_by_current_project": bool(attachment_request and access_token),
+            "status": (
+                "ready_with_user_identity"
+                if attachment_request and access_token
+                else "missing_user_access_token"
+                if attachment_request
+                else "not_needed"
+            ),
+            "reason": "Bitable attachment fields reject generic Drive uploads; upload must use user identity and current bitable context before writing file_token.",
+            "recommended_tool": "project_builtin_user_identity_uploader",
             "recommended_params": {
-                "action": "upload",
                 "parent_type": "bitable_image"
             }
         },
@@ -209,7 +249,7 @@ def build_bitable_write_plan(
                 {
                     "target": "transport",
                     "table_id": transport_table_id,
-                    "fields": build_transport_record(document, []),
+                    "fields": build_transport_record(document, attachment_field_value),
                     "write_action": choose_bitable_write_action([]),
                 }
             )
@@ -218,7 +258,7 @@ def build_bitable_write_plan(
                 {
                     "target": "expense",
                     "table_id": expense_table_id,
-                    "fields": build_expense_record(document, []),
+                    "fields": build_expense_record(document, attachment_field_value),
                     "write_action": choose_bitable_write_action([]),
                 }
             )
@@ -230,8 +270,13 @@ def build_bitable_write_plan(
             "app_token": attachment_request.app_token,
             "attachment_paths": list(attachment_request.attachment_paths),
             "provider": attachment_request.provider,
-            "parent_type": attachment_request.parent_type,
+            "has_access_token": bool(attachment_request.access_token),
         }
+    if attachment_upload_result is not None:
+        if hasattr(attachment_upload_result, "__dict__"):
+            plan["attachment_upload_result"] = dict(attachment_upload_result.__dict__)
+        else:
+            plan["attachment_upload_result"] = attachment_upload_result
     return plan
 
 
