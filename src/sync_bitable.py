@@ -88,6 +88,8 @@ class BitableSettings:
     batch_size: int
     mode: str
     include_attachments: bool
+    app_id: str
+    app_secret: str
     app_token: str
     transport_table_id: str
     expense_table_id: str
@@ -127,6 +129,8 @@ def load_bitable_settings(config: dict[str, Any]) -> BitableSettings:
         batch_size=max(1, min(batch_size, 500)),
         mode=mode,
         include_attachments=include_attachments,
+        app_id=_resolve_secret(bitable, "app_id"),
+        app_secret=_resolve_secret(bitable, "app_secret"),
         app_token=_resolve_secret(bitable, "app_token"),
         transport_table_id=_resolve_secret(bitable, "transport_table_id"),
         expense_table_id=_resolve_secret(bitable, "expense_table_id"),
@@ -230,7 +234,6 @@ def sync_skill_result_to_bitable(
     return summary
 
 
-<<<<<<< HEAD
 def get_tenant_access_token(settings: BitableSettings) -> str:
     if not settings.app_id or not settings.app_secret:
         raise BitableSyncError("Missing FEISHU_APP_ID or FEISHU_APP_SECRET.")
@@ -311,8 +314,6 @@ def upload_attachment(
     }
 
 
-=======
->>>>>>> dca16f5 (Polish bitable display mapping)
 def build_transport_record(document: dict[str, Any], attachment_payload: list[dict[str, Any]] | str) -> dict[str, Any]:
     extraction = document.get("extraction", {}) or {}
     doc_info = extraction.get("document", {}) or {}

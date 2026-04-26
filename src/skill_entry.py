@@ -24,7 +24,15 @@ def run_skill_job(
     attachments: list[dict[str, Any]],
     config_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Run the existing finance pipeline from a skill-friendly attachment payload."""
+    """Run the finance pipeline from a skill-friendly attachment payload.
+
+    Important:
+    - This function completes recognition, formatting, and write-plan generation.
+    - `bitable_write_plan` is only an intermediate artifact for downstream real-run.
+    - When the current OpenClaw session has Feishu Bitable tools available,
+      the caller must continue to execute real create/update instead of treating
+      the returned plan as task completion.
+    """
     config_file = config_path or DEFAULT_CONFIG_PATH
     config, project_root = load_app_config(config_file)
     workspace = create_job_workspace(config, project_root)
@@ -143,7 +151,12 @@ def build_bitable_write_plan(
     app_token: str | None = None,
     config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a user-identity write plan for the current OpenClaw session."""
+    """Build a user-identity write plan for the current OpenClaw session.
+
+    The returned plan is intentionally not the final completion state.
+    Real completion requires the caller/session layer to continue with Feishu
+    Bitable create/update and confirm the write result.
+    """
     try:
         from .sync_bitable import (
             TRANSPORTATION_TYPES,

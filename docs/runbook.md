@@ -70,6 +70,14 @@ apt-get update && apt-get install -y libgl1
 2. 当前 OpenClaw 会话负责：
    - 使用**用户身份**调用飞书多维表格工具
    - 按 `bitable_write_plan.records` 写入交通报销表 / 费用报销表
+   - 回读或确认真实写入结果后再回复用户
+
+请明确：
+- 识别票据只是前半段
+- 生成 `bitable_write_plan` 只是中间产物，不是最终结果
+- 只要当前会话具备飞书多维表格工具能力，就必须继续真实写表
+- **除非明确失败，否则不要停在 plan；必须继续执行真实写表**
+- 只有真实 create/update 成功，才算完成
 
 原因：
 - 应用身份（App ID / App Secret）当前可读表，但 real-run 写 record / 上传附件仍会被飞书拒绝
@@ -87,10 +95,16 @@ apt-get update && apt-get install -y libgl1
   - `documents`
   - `review_queue`
   - `bitable_write_plan`
-- 由当前 OpenClaw 会话使用用户身份工具执行录入：
+- 由当前 OpenClaw 会话使用用户身份工具执行真实录入：
   - 交通类 → `交通报销表`
   - 费用类 → `费用报销表`
+- 对每条记录，先查目标表是否存在可复用空白行：
+  - 若 `doc_id` 为空，则优先 update 空白行
+  - 若无空白行，再 create 新记录
+- 若附件链路暂时不可用，也必须先把非附件字段真实写入
 - 若飞书要求用户授权，按卡片完成授权后重试
+- 写入后必须回读或明确确认写入结果
+- 如果没有真实写入成功，不能把 plan 当作完成结果
 
 ### 4.4 应用身份同步（仅保留为备用/实验链路）
 - 在项目 `.env` 中提供以下变量：
@@ -126,6 +140,10 @@ apt-get update && apt-get install -y libgl1
 - [ ] 主流程可从输入文件生成结构化结果
 - [ ] warning/error 可进入复核队列
 - [ ] dry-run 输出符合预期
+- [ ] `bitable_write_plan` 生成后不会被误判为完成态
 - [ ] real-run 成功写入主表和复核表
+- [ ] 当工具可用时，流程会继续执行真实 create/update，而不是停在 plan
+- [ ] 附件不可用时，非附件字段仍可真实落表
+- [ ] 写入后可回读或明确确认结果
 - [ ] webhook 模式单消息不混单
 - [ ] 运行日志与 summary 完整可追踪
