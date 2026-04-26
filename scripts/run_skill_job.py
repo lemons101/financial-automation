@@ -9,7 +9,7 @@ from pathlib import Path
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run financial-automation skill entry with the project virtualenv.",
+        description="Run financial-automation skill entry with the project virtualenv and emit a user-identity bitable write plan.",
     )
     parser.add_argument(
         "attachments",
