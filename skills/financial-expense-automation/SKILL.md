@@ -248,3 +248,46 @@ The skill directory stores the `SKILL.md` and agent metadata that tell OpenClaw 
 - 应用身份 Feishu OpenAPI 当前虽可读 Bitable app，但仍可能在 record create 和附件上传上失败
 - 用户身份写表已在当前项目方向上证明更接近可用主路径
 - 因此该 skill 的默认执行要求应当是：**拿到 plan 后继续真实写表，而不是把 plan 当最终交付**
+
+## Feishu Permissions Required
+
+当本 skill 需要把识别结果真实写入飞书多维表格时，当前会话或所用身份至少应具备以下权限：
+
+### 必需权限（最小可用集）
+
+- `base:app:read`
+- `base:table:read`
+- `base:field:read`
+- `base:record:retrieve`
+- `base:record:create`
+- `base:record:update`
+- `docs:document.media:upload`
+
+以上权限分别用于：
+- 读取 Bitable app / table / field 元信息，确认目标表与字段结构
+- 查询记录，判断是 create 还是 update，并在写入后回读确认结果
+- 创建或更新报销记录
+- 上传图片 / PDF 到 Bitable 附件上下文，并获得可写入附件字段的 `file_token`
+
+### 按需权限
+
+- `space:document:retrieve`
+
+仅当执行流程需要“列出 / 搜索 Bitable 文件”而不是直接使用已知 `app_token` 时，才需要该权限。
+
+### 不属于本 skill 的必需权限
+
+以下权限不应被默认视为本 skill 的必要前提，除非你明确要让 skill 顺带管理 Bitable 结构：
+- `base:app:create`
+- `base:app:update`
+- `base:app:copy`
+- `base:table:create`
+- `base:table:update`
+- `base:field:create`
+- `base:field:update`
+- `base:field:delete`
+- `base:view:read`
+- `base:view:write_only`
+- `base:record:delete`
+
+默认场景下，本 skill 只需要完成：**读表结构、查记录、新增/更新记录、上传附件**。
