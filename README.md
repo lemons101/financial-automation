@@ -129,6 +129,36 @@ pip install -r requirements.txt
 
 ### 3.4 目录说明
 
+```text
+financial-automation/
+├── bin/
+│   └── run_skill_job                 # 推荐命令行入口，自动加载项目 .env
+├── config/
+│   ├── app_config.yaml               # 主配置：路径、OCR、Bitable、webhook
+│   └── rules.yaml                    # 校验规则：必填字段、置信度、复核策略
+├── docs/
+│   ├── scope.md                      # P0 范围、非目标、完成定义
+│   └── runbook.md                    # 部署、同步、排错手册
+├── runtime/
+│   └── sample_run_input/             # 样例票据文件
+├── scripts/
+│   ├── get_user_access_token.py      # Feishu OAuth code 换取/刷新用户 token
+│   └── run_skill_job.py              # Python 命令行入口
+├── skills/
+│   └── financial-expense-automation/ # OpenClaw/Agent Skill 定义
+├── src/
+│   ├── skill_entry.py                # Skill 执行入口
+│   ├── ocr_extract.py                # 图片 OCR 与 PDF 文本抽取
+│   ├── sync_bitable.py               # Bitable 字段映射与写入计划
+│   ├── bitable_attachment_uploader.py# Bitable 附件上传
+│   └── bitable_session_writer.py     # Bitable create/update 写入
+├── tests/
+│   └── test_smoke.py                 # 关键链路 smoke tests
+├── .env.example                      # 本地环境变量模板
+├── requirements.txt                  # Python 依赖
+└── README.md
+```
+
 - `config/app_config.yaml`：主配置（只保留 env 引用，不放明文 secret）
 - `scripts/get_user_access_token.py`：OAuth token 获取与刷新
 - `src/skill_entry.py`：Skill 执行入口
